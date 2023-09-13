@@ -269,64 +269,75 @@ impl Endpoint {
         */
     }
 
+    fn handle_primary<C>(
+        &mut self,
+        frame_reader: &mut frame::serial::FrameReader,
+        frame_type: frame::FrameType,
+        ctx: &mut C,
+    ) where
+        C: HostContext,
+    {
+        let mut read_ack = false;
+        let mut read_data = false;
+
+        let (read_ack, read_data) = match frame_type {
+            frame::FrameType::StreamData => (false, true),
+            frame::FrameType::StreamAck => (true, false),
+            frame::FrameType::StreamDataAck => (true, true),
+            _ => panic!("NANI?"),
+        };
+
+        let mut try_send_data = false;
+        let mut ack_unrel = false;
+        let mut ack_rel = false;
+
+        if read_ack {
+            if let Some(stream_ack) = frame_reader.read::<frame::StreamAck>() {
+                self.tx_window.acknowledge(stream_ack.data_id);
+
+                if let Some(unrel_id) = stream_ack.unrel_id {}
+
+                if let Some(rel_id) = stream_ack.rel_id {}
+            }
+
+            // TODO: When wouldn't we try to send data?
+            try_send_data = true;
+        }
+
+        if read_data {
+            if let Some(stream_data_header) = frame_reader.read::<frame::StreamDataHeader>() {
+                // TODO: Validate data ID
+
+                while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
+                    if datagram.unrel {
+                        ack_unrel = true;
+                    } else {
+                        ack_rel = true;
+                    }
+                }
+            }
+        }
+
+        self.actual_flush(ack_unrel, ack_rel, try_send_data, ctx);
+    }
+
     pub fn handle_frame<C>(&mut self, frame_bytes: &[u8], ctx: &mut C)
     where
         C: HostContext,
     {
         if let Some((mut frame_reader, frame_type)) = frame::serial::FrameReader::new(frame_bytes) {
-            let mut read_ack = false;
-            let mut read_data = false;
-
             match frame_type {
-                frame::FrameType::HandshakeSyn => {}
-                frame::FrameType::HandshakeSynAck => {}
-                frame::FrameType::HandshakeAck => {}
-                frame::FrameType::Close => {}
-                frame::FrameType::CloseAck => {}
                 frame::FrameType::StreamData => {
-                    read_data = true;
+                    self.handle_primary(&mut frame_reader, frame_type, ctx)
                 }
                 frame::FrameType::StreamAck => {
-                    read_ack = true;
+                    self.handle_primary(&mut frame_reader, frame_type, ctx)
                 }
                 frame::FrameType::StreamDataAck => {
-                    read_ack = true;
-                    read_data = true;
+                    self.handle_primary(&mut frame_reader, frame_type, ctx)
                 }
-                frame::FrameType::StreamSync => {}
+                _ => (),
             }
-
-            let mut try_send_data = false;
-            let mut ack_unrel = false;
-            let mut ack_rel = false;
-
-            if read_ack {
-                if let Some(stream_ack) = frame_reader.read::<frame::StreamAck>() {
-                    self.tx_window.acknowledge(stream_ack.data_id);
-
-                    if let Some(unrel_id) = stream_ack.unrel_id {}
-
-                    if let Some(rel_id) = stream_ack.rel_id {}
-                }
-
-                try_send_data = true;
-            }
-
-            if read_data {
-                if let Some(stream_data_header) = frame_reader.read::<frame::StreamDataHeader>() {
-                    // TODO: Validate data ID
-
-                    while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
-                        if datagram.unrel {
-                            ack_unrel = true;
-                        } else {
-                            ack_rel = true;
-                        }
-                    }
-                }
-            }
-
-            self.actual_flush(ack_unrel, ack_rel, try_send_data, ctx);
         }
     }
 
@@ -334,14 +345,14 @@ impl Endpoint {
         self.rx_packets.pop_front()
     }
 
-    pub fn actual_flush<H>(
+    pub fn actual_flush<C>(
         &mut self,
         ack_unrel: bool,
         ack_rel: bool,
         try_send_data: bool,
-        ctx: &mut H,
+        ctx: &mut C,
     ) where
-        H: HostContext,
+        C: HostContext,
     {
         let mut send_ack = ack_unrel || ack_rel;
 
@@ -487,9 +498,9 @@ impl Endpoint {
         }
     }
 
-    pub fn flush<H>(&mut self, ctx: &mut H)
+    pub fn flush<C>(&mut self, ctx: &mut C)
     where
-        H: HostContext,
+        C: HostContext,
     {
         self.actual_flush(false, false, true, ctx);
     }
