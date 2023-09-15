@@ -237,7 +237,7 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             tx_window: FrameTxWindow::new(0, 20),
             cwnd: 15000,
