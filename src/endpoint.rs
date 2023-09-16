@@ -4,7 +4,7 @@ use super::frame;
 use super::SendMode;
 
 pub enum TimerId {
-    Flush,
+    Rto,
     Receive,
 }
 
@@ -252,7 +252,7 @@ impl Endpoint {
         }
     }
 
-    pub fn enqueue_packet(&mut self, packet_bytes: &[u8], mode: SendMode) {
+    pub fn enqueue_packet(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
         /*
         match mode {
             SendMode::Reliable => {
@@ -263,6 +263,10 @@ impl Endpoint {
             }
         }
         */
+    }
+
+    pub fn pop_packet(&mut self) -> Option<Box<[u8]>> {
+        self.rx_packets.pop_front()
     }
 
     fn handle_primary<C>(
@@ -337,17 +341,14 @@ impl Endpoint {
         }
     }
 
-    pub fn pop_packet(&mut self) -> Option<Box<[u8]>> {
-        self.rx_packets.pop_front()
+    pub fn handle_timer<C>(&mut self, timer: TimerId, now_ms: u64, ctx: &mut C)
+    where
+        C: HostContext,
+    {
     }
 
-    pub fn actual_flush<C>(
-        &mut self,
-        ack_unrel: bool,
-        ack_rel: bool,
-        try_send_data: bool,
-        ctx: &mut C,
-    ) where
+    fn actual_flush<C>(&mut self, ack_unrel: bool, ack_rel: bool, try_send_data: bool, ctx: &mut C)
+    where
         C: HostContext,
     {
         let mut send_ack = ack_unrel || ack_rel;
@@ -499,6 +500,10 @@ impl Endpoint {
         C: HostContext,
     {
         self.actual_flush(false, false, true, ctx);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        false
     }
 }
 

@@ -7,6 +7,40 @@ use super::SendMode;
 
 const SOCKET_POLLING_KEY: usize = 0;
 
+const SYN_TIMEOUT_MS: u64 = 2000;
+const HANDSHAKE_TIMEOUT_MS: u64 = 10000;
+
+const MAX_FRAME_SIZE: usize = 1478;
+
+struct HandshakeState {
+    timeout_time_ms: u64,
+    packet_buffer: Vec<(Box<[u8]>, SendMode)>,
+}
+
+struct ActiveState {
+    endpoint: endpoint::Endpoint,
+}
+
+enum State {
+    Handshake(HandshakeState),
+    Active(ActiveState),
+    Closed,
+}
+
+struct Timer {
+    timeout_ms: Option<u64>,
+}
+
+struct Timers {
+    rto_timer: Timer,  // No response from remote
+    recv_timer: Timer, // When to skip a hole in the reorder buffer
+}
+
+struct HostContext<'a> {
+    timers: &'a mut Timers,
+    socket: &'a net::UdpSocket,
+}
+
 pub enum Event {
     Connect,
     Disconnect,
@@ -25,6 +59,40 @@ pub struct Client {
     recv_buffer: Box<[u8]>,
 
     events: VecDeque<Event>,
+
+    timers: Timers,
+
+    time_ref: time::Instant,
+
+    state: State,
+}
+
+impl<'a> endpoint::HostContext for HostContext<'a> {
+    fn send(&mut self, frame_bytes: &[u8]) {
+        self.socket.send(frame_bytes);
+    }
+
+    fn set_timer(&mut self, timer: endpoint::TimerId, time_ms: u64) {
+        match timer {
+            endpoint::TimerId::Rto => {
+                self.timers.rto_timer.timeout_ms = Some(time_ms);
+            }
+            endpoint::TimerId::Receive => {
+                self.timers.recv_timer.timeout_ms = Some(time_ms);
+            }
+        }
+    }
+
+    fn unset_timer(&mut self, timer: endpoint::TimerId) {
+        match timer {
+            endpoint::TimerId::Rto => {
+                self.timers.rto_timer.timeout_ms = None;
+            }
+            endpoint::TimerId::Receive => {
+                self.timers.recv_timer.timeout_ms = None;
+            }
+        }
+    }
 }
 
 impl Client {
@@ -67,13 +135,43 @@ impl Client {
     fn process_frame(&mut self, frame_size: usize) {
         let frame_bytes = &self.recv_buffer[..frame_size];
 
-        println!(
-            "received a packet of length {}",
-            frame_bytes.len()
-        );
+        println!("received a packet of length {}", frame_bytes.len());
         println!("{:02X?}", frame_bytes);
 
-        self.events.push_back(Event::Receive(frame_bytes.into()));
+        match &mut self.state {
+            State::Handshake(state) => {
+                let mut endpoint = endpoint::Endpoint::new();
+
+                for (packet, mode) in state.packet_buffer.drain(..) {
+                    endpoint.enqueue_packet(packet, mode);
+                }
+
+                self.state = State::Active(ActiveState { endpoint });
+
+                self.timers.rto_timer.timeout_ms = None;
+                self.timers.recv_timer.timeout_ms = None;
+
+                self.events.push_back(Event::Connect);
+            }
+            State::Active(state) => {
+                let ref mut host_ctx = HostContext {
+                    timers: &mut self.timers,
+                    socket: &self.socket,
+                };
+
+                state.endpoint.handle_frame(frame_bytes, host_ctx);
+
+                while let Some(packet) = state.endpoint.pop_packet() {
+                    self.events.push_back(Event::Receive(packet));
+                }
+
+                if state.endpoint.is_closed() {
+                    self.events.push_back(Event::Disconnect);
+                    self.state = State::Closed;
+                }
+            }
+            State::Closed => {}
+        }
     }
 
     /// Reads and processes as many frames as possible from the socket without blocking.
@@ -104,10 +202,90 @@ impl Client {
 
     /// Returns the time remaining until the next timer expires.
     fn next_timer_timeout(&self) -> Option<time::Duration> {
-        None
+        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+
+        let mut timeout_ms = None;
+
+        for timer in [&self.timers.rto_timer, &self.timers.recv_timer] {
+            if let Some(timer_timeout_ms) = timer.timeout_ms {
+                if let Some(t_ms) = timeout_ms {
+                    if timer_timeout_ms < t_ms {
+                        timeout_ms = Some(timer_timeout_ms);
+                    }
+                } else {
+                    timeout_ms = Some(timer_timeout_ms);
+                }
+            }
+        }
+
+        if let Some(t_ms) = timeout_ms {
+            // TODO: Is it possible that reporting a duration this way can skip timer events?
+            return Some(time::Duration::from_millis(t_ms - now_ms));
+        }
+
+        return None;
     }
 
-    fn process_timeouts(&mut self) {}
+    fn process_timeout(&mut self, timer_id: endpoint::TimerId, now_ms: u64) {
+        match &mut self.state {
+            State::Handshake(state) => {
+                match timer_id {
+                    endpoint::TimerId::Rto => {
+                        if now_ms >= state.timeout_time_ms {
+                            // Connection failed
+                            self.events.push_back(Event::Timeout);
+                            self.state = State::Closed;
+                        } else {
+                            self.timers.rto_timer.timeout_ms = Some(now_ms + SYN_TIMEOUT_MS);
+
+                            println!("resending syn...");
+                            self.socket.send(&[0xAB]);
+                        }
+                    }
+                    endpoint::TimerId::Receive => (),
+                }
+            }
+            State::Active(state) => {
+                let ref mut host_ctx = HostContext {
+                    timers: &mut self.timers,
+                    socket: &self.socket,
+                };
+
+                state.endpoint.handle_timer(timer_id, now_ms, host_ctx);
+
+                while let Some(packet) = state.endpoint.pop_packet() {
+                    self.events.push_back(Event::Receive(packet));
+                }
+
+                if state.endpoint.is_closed() {
+                    self.events.push_back(Event::Disconnect);
+                    self.state = State::Closed;
+                }
+            }
+            State::Closed => {}
+        }
+    }
+
+    fn process_timeouts(&mut self) {
+        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+
+        let timer_ids = [endpoint::TimerId::Rto, endpoint::TimerId::Receive];
+
+        for timer_id in timer_ids {
+            let timer = match timer_id {
+                endpoint::TimerId::Rto => &mut self.timers.rto_timer,
+                endpoint::TimerId::Receive => &mut self.timers.recv_timer,
+            };
+
+            if let Some(timeout_ms) = timer.timeout_ms {
+                if now_ms >= timeout_ms {
+                    timer.timeout_ms = None;
+
+                    self.process_timeout(timer_id, now_ms);
+                }
+            }
+        }
+    }
 
     pub fn connect<A>(server_addr: A) -> std::io::Result<Self>
     where
@@ -126,8 +304,8 @@ impl Client {
             poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
         }
 
-        let max_recv_size: usize = 1478;
-        let max_peers: usize = 8192;
+        println!("sending syn...");
+        socket.send(&[0xAA]);
 
         Ok(Self {
             socket,
@@ -137,9 +315,23 @@ impl Client {
             poller,
             poller_events: polling::Events::new(),
 
-            recv_buffer: vec![0; max_recv_size].into_boxed_slice(),
+            recv_buffer: vec![0; MAX_FRAME_SIZE].into_boxed_slice(),
 
-            events: vec![Event::Connect].into(),
+            events: VecDeque::new(),
+
+            timers: Timers {
+                rto_timer: Timer {
+                    timeout_ms: Some(SYN_TIMEOUT_MS),
+                },
+                recv_timer: Timer { timeout_ms: None },
+            },
+
+            time_ref: time::Instant::now(),
+
+            state: State::Handshake(HandshakeState {
+                timeout_time_ms: HANDSHAKE_TIMEOUT_MS,
+                packet_buffer: Vec::new(),
+            }),
         })
     }
 
@@ -220,7 +412,30 @@ impl Client {
         self.local_addr
     }
 
-    pub fn send(&mut self, packet_bytes: &[u8], _mode: SendMode) {
-        self.socket.send(packet_bytes);
+    pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+        match &mut self.state {
+            State::Handshake(state) => {
+                state.packet_buffer.push((packet_bytes, mode));
+            }
+            State::Active(state) => {
+                state.endpoint.enqueue_packet(packet_bytes, mode);
+            }
+            State::Closed => {}
+        }
+    }
+
+    pub fn flush(&mut self) {
+        match &mut self.state {
+            State::Handshake(_) => {}
+            State::Active(state) => {
+                let ref mut host_ctx = HostContext {
+                    timers: &mut self.timers,
+                    socket: &self.socket,
+                };
+
+                state.endpoint.flush(host_ctx);
+            }
+            State::Closed => {}
+        }
     }
 }
