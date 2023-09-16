@@ -69,7 +69,7 @@ pub struct Client {
 
 impl<'a> endpoint::HostContext for HostContext<'a> {
     fn send(&mut self, frame_bytes: &[u8]) {
-        self.socket.send(frame_bytes);
+        let _ = self.socket.send(frame_bytes);
     }
 
     fn set_timer(&mut self, timer: endpoint::TimerId, time_ms: u64) {
@@ -175,29 +175,22 @@ impl Client {
     }
 
     /// Reads and processes as many frames as possible from the socket without blocking.
-    fn process_available_frames(&mut self) -> std::io::Result<()> {
-        while let Some(frame_size) = self.try_read_frame()? {
+    fn process_available_frames(&mut self) {
+        while let Ok(Some(frame_size)) = self.try_read_frame() {
             // Process this frame
             self.process_frame(frame_size);
         }
-
-        Ok(())
     }
 
     /// Reads and processes as many frames as possible from the socket, waiting up to
     /// `wait_timeout` for the first.
-    fn process_available_frames_wait(
-        &mut self,
-        wait_timeout: Option<time::Duration>,
-    ) -> std::io::Result<()> {
-        if let Some(frame_size) = self.wait_for_frame(wait_timeout)? {
+    fn process_available_frames_wait(&mut self, wait_timeout: Option<time::Duration>) {
+        if let Ok(Some(frame_size)) = self.wait_for_frame(wait_timeout) {
             // Process this frame
             self.process_frame(frame_size);
             // Process any further frames without blocking
             return self.process_available_frames();
         }
-
-        Ok(())
     }
 
     /// Returns the time remaining until the next timer expires.
@@ -239,7 +232,7 @@ impl Client {
                             self.timers.rto_timer.timeout_ms = Some(now_ms + SYN_TIMEOUT_MS);
 
                             println!("resending syn...");
-                            self.socket.send(&[0xAB]);
+                            let _ = self.socket.send(&[0xAB]);
                         }
                     }
                     endpoint::TimerId::Receive => (),
@@ -305,7 +298,7 @@ impl Client {
         }
 
         println!("sending syn...");
-        socket.send(&[0xAA]);
+        let _ = socket.send(&[0xAA]);
 
         Ok(Self {
             socket,

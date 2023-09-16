@@ -39,7 +39,7 @@ impl Peer {
 
     pub fn send(&mut self, packet_bytes: &[u8], _mode: SendMode) {
         println!("sending packet to {:?}!", self.peer_addr);
-        self.socket.send_to(packet_bytes, &self.peer_addr);
+        let _ = self.socket.send_to(packet_bytes, &self.peer_addr);
     }
 }
 
@@ -136,29 +136,22 @@ impl Server {
     }
 
     /// Reads and processes as many frames as possible from the socket without blocking.
-    fn process_available_frames(&mut self) -> std::io::Result<()> {
-        while let Some((frame_size, sender_addr)) = self.try_read_frame()? {
+    fn process_available_frames(&mut self) {
+        while let Ok(Some((frame_size, sender_addr))) = self.try_read_frame() {
             // Process this frame
             self.process_frame(frame_size, &sender_addr);
         }
-
-        Ok(())
     }
 
     /// Reads and processes as many frames as possible from the socket, waiting up to
     /// `wait_timeout` for the first.
-    fn process_available_frames_wait(
-        &mut self,
-        wait_timeout: Option<time::Duration>,
-    ) -> std::io::Result<()> {
-        if let Some((frame_size, sender_addr)) = self.wait_for_frame(wait_timeout)? {
+    fn process_available_frames_wait(&mut self, wait_timeout: Option<time::Duration>) {
+        if let Ok(Some((frame_size, sender_addr))) = self.wait_for_frame(wait_timeout) {
             // Process this frame
             self.process_frame(frame_size, &sender_addr);
             // Process any further frames without blocking
             return self.process_available_frames();
         }
-
-        Ok(())
     }
 
     /// Returns the time remaining until the next timer expires.
