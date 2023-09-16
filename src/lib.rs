@@ -162,5 +162,10 @@ mod endpoint;
 mod frame;
 pub mod server;
 
+pub enum SendMode {
+    Reliable,
+    Unreliable(u16),
+}
+
 pub type Client = client::Client;
 pub type Server = server::Server;

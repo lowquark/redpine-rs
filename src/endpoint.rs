@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use super::frame;
+use super::SendMode;
 
 pub enum TimerId {
     Flush,
@@ -11,11 +12,6 @@ pub trait HostContext {
     fn send(&mut self, frame_bytes: &[u8]);
     fn set_timer(&mut self, timer: TimerId, time_ms: u64);
     fn unset_timer(&mut self, timer: TimerId);
-}
-
-pub enum SendMode {
-    Reliable,
-    Unreliable(u16),
 }
 
 struct FrameTxWindow {

@@ -1,11 +1,12 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::net;
 use std::rc::Rc;
 use std::time;
 
 use super::endpoint;
+use super::SendMode;
 
 type PeerId = u32;
 
@@ -34,6 +35,11 @@ impl Peer {
 
     pub fn id(&self) -> PeerId {
         self.id
+    }
+
+    pub fn send(&mut self, packet_bytes: &[u8], _mode: SendMode) {
+        println!("sending packet to {:?}!", self.peer_addr);
+        self.socket.send_to(packet_bytes, &self.peer_addr);
     }
 }
 
@@ -101,37 +107,32 @@ impl Server {
     fn process_frame(&mut self, frame_size: usize, sender_addr: &net::SocketAddr) {
         let frame_bytes = &self.recv_buffer[..frame_size];
 
-        print!(
+        println!(
             "received a packet of length {} from {:?}",
             frame_bytes.len(),
             sender_addr
         );
-        print!("{:02X?}", frame_bytes);
+        println!("{:02X?}", frame_bytes);
 
-        /*
-        if let Some(frame) = frame::serial::deserialize(frame_bytes) {
-            match &frame {
-                frame::serial::DeserializedFrame::HandshakeSynFrame(frame) => {
-                    if let Some(peer_id) = self.peer_ids.new_id() {
-                        let peer = Peer::new(peer_id, Rc::clone(&self.socket), sender_addr.clone());
+        if let Some(peer_rc) = self.peers.get(sender_addr) {
+            let mut peer = peer_rc.borrow_mut();
 
-                        let peer_rc = Rc::new(RefCell::new(peer));
+            println!("peer id: {}", peer.id());
 
-                        self.peers.insert(*sender_addr, peer_rc);
-                    } else {
-                        // No room in the inn
-                    }
-                }
-                _ => {
-                    if let Some(peer) = self.peers.get(sender_addr) {
-                        let peer = peer.borrow_mut();
+            self.events
+                .push_back(Event::Receive(Rc::clone(peer_rc), frame_bytes.into()));
+        } else {
+            let peer_id = 0;
+            let peer = Peer::new(peer_id, Rc::clone(&self.socket), sender_addr.clone());
+            let peer_rc = Rc::new(RefCell::new(peer));
 
-                        // peer.handle_recv(&frame);
-                    }
-                }
-            }
+            self.peers.insert(sender_addr.clone(), Rc::clone(&peer_rc));
+
+            self.events.push_back(Event::Connect(Rc::clone(&peer_rc)));
+
+            self.events
+                .push_back(Event::Receive(peer_rc, frame_bytes.into()));
         }
-        */
     }
 
     /// Reads and processes as many frames as possible from the socket without blocking.
@@ -207,7 +208,7 @@ impl Server {
     /// from the internal socket.
     pub fn poll_event(&mut self) -> Option<Event> {
         if self.events.is_empty() {
-            self.process_available_frames().ok()?;
+            self.process_available_frames();
 
             self.process_timeouts();
         }
@@ -217,26 +218,25 @@ impl Server {
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned.
-    ///
-    /// Returns `None` if an error is encountered while reading from the internal socket.
-    pub fn wait_event(&mut self) -> Option<Event> {
-        while self.events.is_empty() {
+    pub fn wait_event(&mut self) -> Event {
+        loop {
             let wait_timeout = self.next_timer_timeout();
 
-            self.process_available_frames_wait(wait_timeout).ok()?;
+            self.process_available_frames_wait(wait_timeout);
 
             self.process_timeouts();
-        }
 
-        return self.events.pop_front();
+            if let Some(event) = self.events.pop_front() {
+                return event;
+            }
+        }
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned. Waits for a
     /// maximum duration of `timeout`.
     ///
-    /// Returns `None` if no events were available within `timeout`, or if an error was
-    /// encountered while reading from the internal socket.
+    /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
         if self.events.is_empty() {
             let mut remaining_timeout = timeout;
@@ -249,8 +249,7 @@ impl Server {
                     remaining_timeout
                 };
 
-                self.process_available_frames_wait(Some(wait_timeout))
-                    .ok()?;
+                self.process_available_frames_wait(Some(wait_timeout));
 
                 self.process_timeouts();
 

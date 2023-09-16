@@ -3,6 +3,7 @@ use std::net;
 use std::time;
 
 use super::endpoint;
+use super::SendMode;
 
 const SOCKET_POLLING_KEY: usize = 0;
 
@@ -29,9 +30,9 @@ pub struct Client {
 impl Client {
     /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
     /// otherwise.
-    fn try_read_frame(&mut self) -> std::io::Result<Option<(usize, net::SocketAddr)>> {
-        match self.socket.recv_from(&mut self.recv_buffer) {
-            Ok((frame_len, sender_addr)) => Ok(Some((frame_len, sender_addr))),
+    fn try_read_frame(&mut self) -> std::io::Result<Option<usize>> {
+        match self.socket.recv(&mut self.recv_buffer) {
+            Ok(frame_len) => Ok(Some(frame_len)),
             Err(err) => match err.kind() {
                 // The only acceptable error is WouldBlock, indicating no packet
                 std::io::ErrorKind::WouldBlock => Ok(None),
@@ -45,7 +46,7 @@ impl Client {
     fn wait_for_frame(
         &mut self,
         timeout: Option<time::Duration>,
-    ) -> std::io::Result<Option<(usize, net::SocketAddr)>> {
+    ) -> std::io::Result<Option<usize>> {
         // Wait for a readable event (must be done prior to each wait() call)
         // TODO: Does this work if the socket is already readable?
         self.poller
@@ -63,47 +64,23 @@ impl Client {
         }
     }
 
-    fn process_frame(&mut self, frame_size: usize, sender_addr: &net::SocketAddr) {
+    fn process_frame(&mut self, frame_size: usize) {
         let frame_bytes = &self.recv_buffer[..frame_size];
 
-        print!(
-            "received a packet of length {} from {:?}",
-            frame_bytes.len(),
-            sender_addr
+        println!(
+            "received a packet of length {}",
+            frame_bytes.len()
         );
-        print!("{:02X?}", frame_bytes);
+        println!("{:02X?}", frame_bytes);
 
-        /*
-        if let Some(frame) = frame::serial::deserialize(frame_bytes) {
-            match &frame {
-                frame::serial::DeserializedFrame::HandshakeSynFrame(frame) => {
-                    if let Some(peer_id) = self.peer_ids.new_id() {
-                        let peer = Peer::new(peer_id, Rc::clone(&self.socket), sender_addr.clone());
-
-                        let peer_rc = Rc::new(RefCell::new(peer));
-
-                        self.peers.insert(*sender_addr, peer_rc);
-                    } else {
-                        // No room in the inn
-                    }
-                }
-                _ => {
-                    if let Some(peer) = self.peers.get(sender_addr) {
-                        let peer = peer.borrow_mut();
-
-                        // peer.handle_recv(&frame);
-                    }
-                }
-            }
-        }
-        */
+        self.events.push_back(Event::Receive(frame_bytes.into()));
     }
 
     /// Reads and processes as many frames as possible from the socket without blocking.
     fn process_available_frames(&mut self) -> std::io::Result<()> {
-        while let Some((frame_size, sender_addr)) = self.try_read_frame()? {
+        while let Some(frame_size) = self.try_read_frame()? {
             // Process this frame
-            self.process_frame(frame_size, &sender_addr);
+            self.process_frame(frame_size);
         }
 
         Ok(())
@@ -115,9 +92,9 @@ impl Client {
         &mut self,
         wait_timeout: Option<time::Duration>,
     ) -> std::io::Result<()> {
-        if let Some((frame_size, sender_addr)) = self.wait_for_frame(wait_timeout)? {
+        if let Some(frame_size) = self.wait_for_frame(wait_timeout)? {
             // Process this frame
-            self.process_frame(frame_size, &sender_addr);
+            self.process_frame(frame_size);
             // Process any further frames without blocking
             return self.process_available_frames();
         }
@@ -162,7 +139,7 @@ impl Client {
 
             recv_buffer: vec![0; max_recv_size].into_boxed_slice(),
 
-            events: VecDeque::new(),
+            events: vec![Event::Connect].into(),
         })
     }
 
@@ -173,7 +150,7 @@ impl Client {
     /// from the internal socket.
     pub fn poll_event(&mut self) -> Option<Event> {
         if self.events.is_empty() {
-            self.process_available_frames().ok()?;
+            self.process_available_frames();
 
             self.process_timeouts();
         }
@@ -183,26 +160,25 @@ impl Client {
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned.
-    ///
-    /// Returns `None` if an error is encountered while reading from the internal socket.
-    pub fn wait_event(&mut self) -> Option<Event> {
-        while self.events.is_empty() {
+    pub fn wait_event(&mut self) -> Event {
+        loop {
             let wait_timeout = self.next_timer_timeout();
 
-            self.process_available_frames_wait(wait_timeout).ok()?;
+            self.process_available_frames_wait(wait_timeout);
 
             self.process_timeouts();
-        }
 
-        return self.events.pop_front();
+            if let Some(event) = self.events.pop_front() {
+                return event;
+            }
+        }
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned. Waits for a
     /// maximum duration of `timeout`.
     ///
-    /// Returns `None` if no events were available within `timeout`, or if an error was
-    /// encountered while reading from the internal socket.
+    /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
         if self.events.is_empty() {
             let mut remaining_timeout = timeout;
@@ -215,8 +191,7 @@ impl Client {
                     remaining_timeout
                 };
 
-                self.process_available_frames_wait(Some(wait_timeout))
-                    .ok()?;
+                self.process_available_frames_wait(Some(wait_timeout));
 
                 self.process_timeouts();
 
@@ -243,5 +218,9 @@ impl Client {
 
     pub fn local_addr(&self) -> net::SocketAddr {
         self.local_addr
+    }
+
+    pub fn send(&mut self, packet_bytes: &[u8], _mode: SendMode) {
+        self.socket.send(packet_bytes);
     }
 }
