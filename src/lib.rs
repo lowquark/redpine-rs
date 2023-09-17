@@ -161,6 +161,7 @@ pub mod client;
 mod endpoint;
 mod frame;
 pub mod server;
+mod timer_wheel;
 
 pub enum SendMode {
     Reliable,

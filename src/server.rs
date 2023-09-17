@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::time;
 
 use super::endpoint;
+use super::timer_wheel;
 use super::SendMode;
 
 type PeerId = u32;
@@ -99,6 +100,10 @@ pub struct Server {
     peer_count_max: usize,
 
     events: VecDeque<Event>,
+
+    time_ref: time::Instant,
+    timer_wheel: timer_wheel::TimerWheel<i32>,
+    timer_step: timer_wheel::StepState<i32>,
 }
 
 impl Server {
@@ -229,10 +234,20 @@ impl Server {
 
     /// Returns the time remaining until the next timer expires.
     fn next_timer_timeout(&self) -> Option<time::Duration> {
-        None
+        return self
+            .timer_wheel
+            .next_expiration_time_ms()
+            .map(|time_ms| time::Duration::from_millis(time_ms));
     }
 
-    fn process_timeouts(&mut self) {}
+    fn process_timeouts(&mut self) {
+        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+
+        self.timer_step
+            .step(&mut self.timer_wheel, now_ms, |timer_wheel, data| {
+                println!("Timer expired!");
+            });
+    }
 
     pub fn bind<A>(bind_addr: A) -> std::io::Result<Self>
     where
@@ -251,6 +266,21 @@ impl Server {
         let max_recv_size: usize = 1478;
         let max_peers: usize = 8192;
 
+        static TIMER_WHEEL_ARRAY_CONFIG: [timer_wheel::ArrayConfig; 3] = [
+            timer_wheel::ArrayConfig {
+                size: 32,
+                ms_per_bin: 4,
+            },
+            timer_wheel::ArrayConfig {
+                size: 32,
+                ms_per_bin: 4 * 8,
+            },
+            timer_wheel::ArrayConfig {
+                size: 32,
+                ms_per_bin: 4 * 8 * 8,
+            },
+        ];
+
         Ok(Self {
             socket: Rc::new(socket),
             local_addr,
@@ -265,6 +295,10 @@ impl Server {
             peer_count_max: max_peers,
 
             events: VecDeque::new(),
+
+            time_ref: time::Instant::now(),
+            timer_wheel: timer_wheel::TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
+            timer_step: timer_wheel::StepState::new(),
         })
     }
 
