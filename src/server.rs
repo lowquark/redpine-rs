@@ -13,77 +13,99 @@ type PeerId = u32;
 
 const SOCKET_POLLING_KEY: usize = 0;
 
+struct PeerTimerData {
+    peer_addr: net::SocketAddr,
+    name: endpoint::TimerId,
+}
+
+type TimerWheel = timer_wheel::TimerWheel<PeerTimerData>;
+
+struct PeerTimers {
+    rto_timer_id: Option<timer_wheel::TimerId>,
+    receive_timer_id: Option<timer_wheel::TimerId>,
+}
+
+impl PeerTimers {
+    fn get_mut(&mut self, id: endpoint::TimerId) -> &mut Option<timer_wheel::TimerId> {
+        match id {
+            endpoint::TimerId::Rto => &mut self.rto_timer_id,
+            endpoint::TimerId::Receive => &mut self.receive_timer_id,
+        }
+    }
+}
+
 struct HostContext<'a> {
     socket: &'a net::UdpSocket,
     peer_addr: &'a net::SocketAddr,
+    timer_wheel: &'a mut TimerWheel,
+    timers: &'a mut PeerTimers,
 }
 
 impl<'a> endpoint::HostContext for HostContext<'a> {
     fn send(&mut self, frame_bytes: &[u8]) {
+        println!("sending frame to {:?}!", self.peer_addr);
         let _ = self.socket.send_to(frame_bytes, self.peer_addr);
     }
 
-    fn set_timer(&mut self, timer: endpoint::TimerId, time_ms: u64) {}
+    fn set_timer(&mut self, name: endpoint::TimerId, time_ms: u64) {
+        let timer_id = self.timers.get_mut(name);
 
-    fn unset_timer(&mut self, timer: endpoint::TimerId) {}
-}
+        if let Some(id) = timer_id.take() {
+            self.timer_wheel.unset_timer(id);
+        }
 
-pub struct Peer {
-    id: PeerId,
+        *timer_id = Some(self.timer_wheel.set_timer(time_ms, PeerTimerData {
+            peer_addr: self.peer_addr.clone(),
+            name,
+        }))
+    }
 
-    socket: Rc<net::UdpSocket>,
-    peer_addr: net::SocketAddr,
+    fn unset_timer(&mut self, name: endpoint::TimerId) {
+        let timer_id = self.timers.get_mut(name);
 
-    endpoint: endpoint::Endpoint,
-}
-
-impl Peer {
-    fn new(id: PeerId, socket: Rc<net::UdpSocket>, peer_addr: net::SocketAddr) -> Self {
-        Self {
-            id,
-
-            socket,
-            peer_addr,
-
-            endpoint: endpoint::Endpoint::new(),
+        if let Some(id) = timer_id.take() {
+            self.timer_wheel.unset_timer(id);
         }
     }
+}
 
-    pub fn id(&self) -> PeerId {
-        self.id
-    }
+struct Peer {
+    addr: net::SocketAddr,
+    endpoint: endpoint::Endpoint,
+    timers: PeerTimers,
+}
 
-    pub fn send(&mut self, packet_bytes: &[u8], _mode: SendMode) {
-        println!("sending packet to {:?}!", self.peer_addr);
-        let _ = self.socket.send_to(packet_bytes, &self.peer_addr);
+pub struct PeerHandle<'a> {
+    peer: &'a mut Peer,
+    socket: &'a net::UdpSocket,
+    timer_wheel: &'a mut TimerWheel,
+}
+
+impl<'a> PeerHandle<'a> {
+    pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+        println!("sending packet to {:?}!", self.peer.addr);
+        let _ = self.peer.endpoint.enqueue_packet(packet_bytes, mode);
     }
 
     pub fn flush(&mut self) {
         let ref mut host_ctx = HostContext {
             socket: &*self.socket,
-            peer_addr: &self.peer_addr,
+            peer_addr: &self.peer.addr,
+            timer_wheel: &mut self.timer_wheel,
+            timers: &mut self.peer.timers,
         };
 
-        self.endpoint.flush(host_ctx);
-    }
+        self.peer.endpoint.flush(host_ctx);
 
-    fn handle_frame(&mut self, frame_bytes: &[u8]) {
-        let ref mut host_ctx = HostContext {
-            socket: &*self.socket,
-            peer_addr: &self.peer_addr,
-        };
-
-        self.endpoint.handle_frame(frame_bytes, host_ctx);
+        // flush() generates no events, so no need to poll here
     }
 }
 
-type PeerRc = Rc<RefCell<Peer>>;
-
 pub enum Event {
-    Connect(PeerRc),
-    Disconnect(PeerRc),
-    Receive(PeerRc, Box<[u8]>),
-    Timeout(PeerRc),
+    Connect(net::SocketAddr),
+    Disconnect(net::SocketAddr),
+    Receive(net::SocketAddr, Box<[u8]>),
+    Timeout(net::SocketAddr),
 }
 
 pub struct Server {
@@ -95,15 +117,14 @@ pub struct Server {
 
     recv_buffer: Box<[u8]>,
 
-    // peer_ids: PeerIdReel,
-    peers: HashMap<net::SocketAddr, PeerRc>,
+    peers: HashMap<net::SocketAddr, Peer>,
     peer_count_max: usize,
 
     events: VecDeque<Event>,
 
     time_ref: time::Instant,
-    timer_wheel: timer_wheel::TimerWheel<i32>,
-    timer_step: timer_wheel::StepState<i32>,
+    timer_wheel: TimerWheel,
+    timer_data_expired: Vec<PeerTimerData>,
 }
 
 impl Server {
@@ -144,6 +165,8 @@ impl Server {
     }
 
     fn process_frame(&mut self, frame_size: usize, sender_addr: &net::SocketAddr) {
+        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+
         let ref frame_bytes = self.recv_buffer[..frame_size];
 
         println!(
@@ -176,35 +199,54 @@ impl Server {
                         && !self.peers.contains_key(&sender_addr)
                     {
                         // Associate a new peer object with this address
-                        let peer_id = 0;
-                        let peer = Peer::new(peer_id, Rc::clone(&self.socket), sender_addr.clone());
-                        let peer_rc = Rc::new(RefCell::new(peer));
-                        self.peers.insert(sender_addr.clone(), Rc::clone(&peer_rc));
+                        let peer = Peer {
+                            endpoint: endpoint::Endpoint::new(),
+                            addr: sender_addr.clone(),
+                            timers: PeerTimers {
+                                rto_timer_id: None,
+                                receive_timer_id: None,
+                            },
+                        };
+                        self.peers.insert(sender_addr.clone(), peer);
+
+                        // Set a dummy timer just for fun
+                        self.timer_wheel.set_timer(
+                            now_ms + 500,
+                            PeerTimerData {
+                                peer_addr: sender_addr.clone(),
+                                name: endpoint::TimerId::Rto,
+                            },
+                        );
 
                         // Notify user of inbound connection
-                        self.events.push_back(Event::Connect(peer_rc));
+                        self.events.push_back(Event::Connect(sender_addr.clone()));
                     }
 
                     // Always send an ack in case a previous ack was dropped.
                     println!("acking phase β...");
                     let _ = self.socket.send_to(&[0xB1], sender_addr);
                 }
-            } else if let Some(peer_rc) = self.peers.get(sender_addr) {
-                let mut peer = peer_rc.borrow_mut();
+            } else if let Some(peer) = self.peers.get_mut(sender_addr) {
+                let endpoint = &mut peer.endpoint;
+                let address = &mut peer.endpoint;
 
-                println!("associated peer id: {}", peer.id());
+                let ref mut host_ctx = HostContext {
+                    socket: &*self.socket,
+                    peer_addr: sender_addr,
+                    timer_wheel: &mut self.timer_wheel,
+                    timers: &mut peer.timers,
+                };
 
-                peer.handle_frame(frame_bytes);
+                peer.endpoint.handle_frame(frame_bytes, host_ctx);
 
                 while let Some(packet) = peer.endpoint.pop_packet() {
                     self.events
-                        .push_back(Event::Receive(Rc::clone(peer_rc), packet));
+                        .push_back(Event::Receive(sender_addr.clone(), packet));
                 }
 
                 if peer.endpoint.is_closed() {
-                    self.events.push_back(Event::Disconnect(Rc::clone(peer_rc)));
+                    self.events.push_back(Event::Disconnect(sender_addr.clone()));
 
-                    std::mem::drop(peer);
                     self.peers.remove(sender_addr);
                 }
             }
@@ -234,19 +276,45 @@ impl Server {
 
     /// Returns the time remaining until the next timer expires.
     fn next_timer_timeout(&self) -> Option<time::Duration> {
+        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+
+        // TODO: Is it possible that reporting a duration this way can skip timer events?
         return self
             .timer_wheel
             .next_expiration_time_ms()
-            .map(|time_ms| time::Duration::from_millis(time_ms));
+            .map(|time_ms| time::Duration::from_millis(time_ms - now_ms));
     }
 
     fn process_timeouts(&mut self) {
         let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
 
-        self.timer_step
-            .step(&mut self.timer_wheel, now_ms, |timer_wheel, data| {
-                println!("Timer expired!");
-            });
+        self.timer_wheel.step(now_ms, &mut self.timer_data_expired);
+
+        for timer_data in self.timer_data_expired.drain(..) {
+            println!("Timer expired!");
+
+            if let Some(peer) = self.peers.get_mut(&timer_data.peer_addr) {
+                let ref mut host_ctx = HostContext {
+                    socket: &*self.socket,
+                    peer_addr: &timer_data.peer_addr,
+                    timer_wheel: &mut self.timer_wheel,
+                    timers: &mut peer.timers,
+                };
+
+                peer.endpoint.handle_timer(timer_data.name, now_ms, host_ctx);
+
+                while let Some(packet) = peer.endpoint.pop_packet() {
+                    self.events
+                        .push_back(Event::Receive(timer_data.peer_addr.clone(), packet));
+                }
+
+                if peer.endpoint.is_closed() {
+                    self.events.push_back(Event::Disconnect(timer_data.peer_addr.clone()));
+
+                    self.peers.remove(&timer_data.peer_addr);
+                }
+            }
+        }
     }
 
     pub fn bind<A>(bind_addr: A) -> std::io::Result<Self>
@@ -290,15 +358,14 @@ impl Server {
 
             recv_buffer: vec![0; max_recv_size].into_boxed_slice(),
 
-            //peer_ids: PeerIdReel::new(max_peers),
             peers: HashMap::new(),
             peer_count_max: max_peers,
 
             events: VecDeque::new(),
 
             time_ref: time::Instant::now(),
-            timer_wheel: timer_wheel::TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
-            timer_step: timer_wheel::StepState::new(),
+            timer_wheel: TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
+            timer_data_expired: Vec::new(),
         })
     }
 
@@ -377,5 +444,20 @@ impl Server {
 
     pub fn local_addr(&self) -> net::SocketAddr {
         self.local_addr
+    }
+
+    pub fn peer<'a>(&'a mut self, address: &net::SocketAddr) -> Option<PeerHandle<'a>> {
+        // TODO: A peer handle cannot destroy itself if constructed this way. Is it awkward to use
+        // the peer handle for everything but immediate disconnection?
+
+        if let Some(peer) = self.peers.get_mut(address) {
+            Some(PeerHandle {
+                peer,
+                socket: &self.socket,
+                timer_wheel: &mut self.timer_wheel,
+            })
+        } else {
+            None
+        }
     }
 }

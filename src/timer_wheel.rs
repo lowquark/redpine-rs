@@ -262,6 +262,117 @@ impl<T> TimerWheel<T> {
             None
         }
     }
+
+    fn expire_all(
+        timer_entries: &mut Vec<TimerEntry>,
+        timer_data: &mut Vec<Option<T>>,
+        free_list: &mut Vec<TimerIndex>,
+        sentinel_timer_idx: u32,
+        expired_data: &mut Vec<T>,
+    ) {
+        let mut timer_idx = timer_entries[sentinel_timer_idx as usize].next_idx;
+
+        while timer_idx != sentinel_timer_idx {
+            let handler = timer_data[timer_idx as usize].take().unwrap();
+            expired_data.push(handler);
+
+            let timer_next_idx = timer_entries[timer_idx as usize].next_idx;
+
+            // timer.next := timer
+            timer_entries[timer_idx as usize].next_idx = timer_idx;
+            // timer.prev := timer
+            timer_entries[timer_idx as usize].prev_idx = timer_idx;
+
+            free_list.push(timer_idx);
+
+            timer_idx = timer_next_idx;
+        }
+
+        timer_entries[sentinel_timer_idx as usize].next_idx = sentinel_timer_idx;
+        timer_entries[sentinel_timer_idx as usize].prev_idx = sentinel_timer_idx;
+    }
+
+    fn expire_expired(
+        timer_entries: &mut Vec<TimerEntry>,
+        timer_data: &mut Vec<Option<T>>,
+        free_list: &mut Vec<TimerIndex>,
+        sentinel_timer_idx: u32,
+        expired_data: &mut Vec<T>,
+        time_now_ms: u64,
+    ) {
+        let mut timer_idx = timer_entries[sentinel_timer_idx as usize].next_idx;
+
+        while timer_idx != sentinel_timer_idx {
+            if timer_entries[timer_idx as usize].timeout_time_ms <= time_now_ms {
+                let handler = timer_data[timer_idx as usize].take().unwrap();
+                expired_data.push(handler);
+
+                let timer_next_idx = timer_entries[timer_idx as usize].next_idx;
+                let timer_prev_idx = timer_entries[timer_idx as usize].prev_idx;
+
+                // timer.prev.next := timer.next
+                timer_entries[timer_prev_idx as usize].next_idx = timer_next_idx;
+                // timer.next.prev := timer.prev
+                timer_entries[timer_next_idx as usize].prev_idx = timer_prev_idx;
+                // timer.next := timer
+                timer_entries[timer_idx as usize].next_idx = timer_idx;
+                // timer.prev := timer
+                timer_entries[timer_idx as usize].prev_idx = timer_idx;
+
+                free_list.push(timer_idx);
+
+                timer_idx = timer_next_idx;
+            } else {
+                let timer_next_idx = timer_entries[timer_idx as usize].next_idx;
+
+                timer_idx = timer_next_idx;
+            }
+        }
+    }
+
+    pub fn step(&mut self, time_now_ms: u64, entries_out: &mut Vec<T>) {
+        assert!(
+            time_now_ms >= self.last_step_time_ms,
+            "attempt to step in the past"
+        );
+
+        let array_count = self.arrays.len();
+
+        for (array_idx, array) in self.arrays.iter_mut().enumerate() {
+            let time_now_idx = time_now_ms >> array.bin_time_shift;
+
+            let end_idx = u64::min(time_now_idx, array.next_abs_bin_idx + array.size);
+
+            for bin_idx in array.next_abs_bin_idx..end_idx {
+                let true_bin_idx = bin_idx & array.bin_time_mask;
+
+                let sentinel_timer_idx = array.timer_indices.start + true_bin_idx as u32;
+
+                if array_idx < array_count - 1 {
+                    Self::expire_all(
+                        &mut self.timer_entries,
+                        &mut self.timer_data,
+                        &mut self.free_list,
+                        sentinel_timer_idx,
+                        entries_out,
+                    );
+                } else {
+                    Self::expire_expired(
+                        &mut self.timer_entries,
+                        &mut self.timer_data,
+                        &mut self.free_list,
+                        sentinel_timer_idx,
+                        entries_out,
+                        time_now_ms,
+                    );
+                }
+            }
+
+            array.next_abs_bin_idx = time_now_idx;
+        }
+
+        self.last_step_time_ms = time_now_ms;
+    }
 }
 
 impl<T> StepState<T> {

@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use super::frame;
 use super::SendMode;
 
+#[derive(Clone,Copy,Debug)]
 pub enum TimerId {
     Rto,
     Receive,
