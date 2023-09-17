@@ -12,6 +12,21 @@ type PeerId = u32;
 
 const SOCKET_POLLING_KEY: usize = 0;
 
+struct HostContext<'a> {
+    socket: &'a net::UdpSocket,
+    peer_addr: &'a net::SocketAddr,
+}
+
+impl<'a> endpoint::HostContext for HostContext<'a> {
+    fn send(&mut self, frame_bytes: &[u8]) {
+        let _ = self.socket.send_to(frame_bytes, self.peer_addr);
+    }
+
+    fn set_timer(&mut self, timer: endpoint::TimerId, time_ms: u64) {}
+
+    fn unset_timer(&mut self, timer: endpoint::TimerId) {}
+}
+
 pub struct Peer {
     id: PeerId,
 
@@ -41,6 +56,24 @@ impl Peer {
         println!("sending packet to {:?}!", self.peer_addr);
         let _ = self.socket.send_to(packet_bytes, &self.peer_addr);
     }
+
+    pub fn flush(&mut self) {
+        let ref mut host_ctx = HostContext {
+            socket: &*self.socket,
+            peer_addr: &self.peer_addr,
+        };
+
+        self.endpoint.flush(host_ctx);
+    }
+
+    fn handle_frame(&mut self, frame_bytes: &[u8]) {
+        let ref mut host_ctx = HostContext {
+            socket: &*self.socket,
+            peer_addr: &self.peer_addr,
+        };
+
+        self.endpoint.handle_frame(frame_bytes, host_ctx);
+    }
 }
 
 type PeerRc = Rc<RefCell<Peer>>;
@@ -63,6 +96,7 @@ pub struct Server {
 
     // peer_ids: PeerIdReel,
     peers: HashMap<net::SocketAddr, PeerRc>,
+    peer_count_max: usize,
 
     events: VecDeque<Event>,
 }
@@ -105,7 +139,7 @@ impl Server {
     }
 
     fn process_frame(&mut self, frame_size: usize, sender_addr: &net::SocketAddr) {
-        let frame_bytes = &self.recv_buffer[..frame_size];
+        let ref frame_bytes = self.recv_buffer[..frame_size];
 
         println!(
             "received a packet of length {} from {:?}",
@@ -114,24 +148,63 @@ impl Server {
         );
         println!("{:02X?}", frame_bytes);
 
-        if let Some(peer_rc) = self.peers.get(sender_addr) {
-            let mut peer = peer_rc.borrow_mut();
+        let crc_valid = true;
 
-            println!("peer id: {}", peer.id());
+        if crc_valid {
+            // Initial handshakes are handled without an allocation in the peer table. Once a valid
+            // open request is received, the sender's address is assumed valid (i.e. blockable) and
+            // an entry in the peer table is created. Other frame types are handled by the
+            // associated peer object.
 
-            self.events
-                .push_back(Event::Receive(Rc::clone(peer_rc), frame_bytes.into()));
+            if frame_bytes == [0xA0] {
+                let valid = true;
+
+                if valid {
+                    println!("acking phase α...");
+                    let _ = self.socket.send_to(&[0xA1], sender_addr);
+                }
+            } else if frame_bytes == [0xB0] {
+                let valid = true;
+
+                if valid {
+                    if self.peers.len() < self.peer_count_max
+                        && !self.peers.contains_key(&sender_addr)
+                    {
+                        // Associate a new peer object with this address
+                        let peer_id = 0;
+                        let peer = Peer::new(peer_id, Rc::clone(&self.socket), sender_addr.clone());
+                        let peer_rc = Rc::new(RefCell::new(peer));
+                        self.peers.insert(sender_addr.clone(), Rc::clone(&peer_rc));
+
+                        // Notify user of inbound connection
+                        self.events.push_back(Event::Connect(peer_rc));
+                    }
+
+                    // Always send an ack in case a previous ack was dropped.
+                    println!("acking phase β...");
+                    let _ = self.socket.send_to(&[0xB1], sender_addr);
+                }
+            } else if let Some(peer_rc) = self.peers.get(sender_addr) {
+                let mut peer = peer_rc.borrow_mut();
+
+                println!("associated peer id: {}", peer.id());
+
+                peer.handle_frame(frame_bytes);
+
+                while let Some(packet) = peer.endpoint.pop_packet() {
+                    self.events
+                        .push_back(Event::Receive(Rc::clone(peer_rc), packet));
+                }
+
+                if peer.endpoint.is_closed() {
+                    self.events.push_back(Event::Disconnect(Rc::clone(peer_rc)));
+
+                    std::mem::drop(peer);
+                    self.peers.remove(sender_addr);
+                }
+            }
         } else {
-            let peer_id = 0;
-            let peer = Peer::new(peer_id, Rc::clone(&self.socket), sender_addr.clone());
-            let peer_rc = Rc::new(RefCell::new(peer));
-
-            self.peers.insert(sender_addr.clone(), Rc::clone(&peer_rc));
-
-            self.events.push_back(Event::Connect(Rc::clone(&peer_rc)));
-
-            self.events
-                .push_back(Event::Receive(peer_rc, frame_bytes.into()));
+            // We don't negotiate with entropy
         }
     }
 
@@ -189,6 +262,7 @@ impl Server {
 
             //peer_ids: PeerIdReel::new(max_peers),
             peers: HashMap::new(),
+            peer_count_max: max_peers,
 
             events: VecDeque::new(),
         })

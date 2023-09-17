@@ -12,8 +12,15 @@ const HANDSHAKE_TIMEOUT_MS: u64 = 10000;
 
 const MAX_FRAME_SIZE: usize = 1478;
 
+enum HandshakePhase {
+    Alpha,
+    Beta,
+}
+
 struct HandshakeState {
+    phase: HandshakePhase,
     timeout_time_ms: u64,
+    timeout_ms: u64,
     packet_buffer: Vec<(Box<[u8]>, SendMode)>,
 }
 
@@ -133,44 +140,65 @@ impl Client {
     }
 
     fn process_frame(&mut self, frame_size: usize) {
+        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+
         let frame_bytes = &self.recv_buffer[..frame_size];
 
         println!("received a packet of length {}", frame_bytes.len());
         println!("{:02X?}", frame_bytes);
 
-        match &mut self.state {
-            State::Handshake(state) => {
-                let mut endpoint = endpoint::Endpoint::new();
+        let crc_valid = true;
 
-                for (packet, mode) in state.packet_buffer.drain(..) {
-                    endpoint.enqueue_packet(packet, mode);
+        if crc_valid {
+            match &mut self.state {
+                State::Handshake(state) => match state.phase {
+                    HandshakePhase::Alpha => {
+                        if frame_bytes == [0xA1] {
+                            state.phase = HandshakePhase::Beta;
+                            state.timeout_time_ms = now_ms + state.timeout_ms;
+
+                            println!("requesting phase β...");
+                            let _ = self.socket.send(&[0xB0]);
+                        }
+                    }
+                    HandshakePhase::Beta => {
+                        if frame_bytes == [0xB1] {
+                            let mut endpoint = endpoint::Endpoint::new();
+
+                            for (packet, mode) in state.packet_buffer.drain(..) {
+                                endpoint.enqueue_packet(packet, mode);
+                            }
+
+                            self.state = State::Active(ActiveState { endpoint });
+
+                            self.timers.rto_timer.timeout_ms = None;
+                            self.timers.recv_timer.timeout_ms = None;
+
+                            self.events.push_back(Event::Connect);
+                        }
+                    }
+                },
+                State::Active(state) => {
+                    let ref mut host_ctx = HostContext {
+                        timers: &mut self.timers,
+                        socket: &self.socket,
+                    };
+
+                    state.endpoint.handle_frame(frame_bytes, host_ctx);
+
+                    while let Some(packet) = state.endpoint.pop_packet() {
+                        self.events.push_back(Event::Receive(packet));
+                    }
+
+                    if state.endpoint.is_closed() {
+                        self.events.push_back(Event::Disconnect);
+                        self.state = State::Closed;
+                    }
                 }
-
-                self.state = State::Active(ActiveState { endpoint });
-
-                self.timers.rto_timer.timeout_ms = None;
-                self.timers.recv_timer.timeout_ms = None;
-
-                self.events.push_back(Event::Connect);
+                State::Closed => {}
             }
-            State::Active(state) => {
-                let ref mut host_ctx = HostContext {
-                    timers: &mut self.timers,
-                    socket: &self.socket,
-                };
-
-                state.endpoint.handle_frame(frame_bytes, host_ctx);
-
-                while let Some(packet) = state.endpoint.pop_packet() {
-                    self.events.push_back(Event::Receive(packet));
-                }
-
-                if state.endpoint.is_closed() {
-                    self.events.push_back(Event::Disconnect);
-                    self.state = State::Closed;
-                }
-            }
-            State::Closed => {}
+        } else {
+            // We don't negotiate with entropy
         }
     }
 
@@ -231,8 +259,16 @@ impl Client {
                         } else {
                             self.timers.rto_timer.timeout_ms = Some(now_ms + SYN_TIMEOUT_MS);
 
-                            println!("resending syn...");
-                            let _ = self.socket.send(&[0xAB]);
+                            match state.phase {
+                                HandshakePhase::Alpha => {
+                                    println!("re-requesting phase α...");
+                                    let _ = self.socket.send(&[0xA0]);
+                                }
+                                HandshakePhase::Beta => {
+                                    println!("re-requesting phase β...");
+                                    let _ = self.socket.send(&[0xB0]);
+                                }
+                            }
                         }
                     }
                     endpoint::TimerId::Receive => (),
@@ -297,8 +333,8 @@ impl Client {
             poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
         }
 
-        println!("sending syn...");
-        let _ = socket.send(&[0xAA]);
+        println!("requesting phase α...");
+        let _ = socket.send(&[0xA0]);
 
         Ok(Self {
             socket,
@@ -322,7 +358,9 @@ impl Client {
             time_ref: time::Instant::now(),
 
             state: State::Handshake(HandshakeState {
+                phase: HandshakePhase::Alpha,
                 timeout_time_ms: HANDSHAKE_TIMEOUT_MS,
+                timeout_ms: HANDSHAKE_TIMEOUT_MS,
                 packet_buffer: Vec::new(),
             }),
         })
