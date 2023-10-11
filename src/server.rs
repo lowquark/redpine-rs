@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net;
@@ -14,7 +14,7 @@ type PeerId = u32;
 const SOCKET_POLLING_KEY: usize = 0;
 
 struct PeerTimerData {
-    peer_addr: net::SocketAddr,
+    peer_id: PeerId,
     name: endpoint::TimerId,
 }
 
@@ -36,6 +36,7 @@ impl PeerTimers {
 
 struct HostContext<'a> {
     socket: &'a net::UdpSocket,
+    peer_id: PeerId,
     peer_addr: &'a net::SocketAddr,
     timer_wheel: &'a mut TimerWheel,
     timers: &'a mut PeerTimers,
@@ -54,10 +55,13 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
             self.timer_wheel.unset_timer(id);
         }
 
-        *timer_id = Some(self.timer_wheel.set_timer(time_ms, PeerTimerData {
-            peer_addr: self.peer_addr.clone(),
-            name,
-        }))
+        *timer_id = Some(self.timer_wheel.set_timer(
+            time_ms,
+            PeerTimerData {
+                peer_id: self.peer_id,
+                name,
+            },
+        ))
     }
 
     fn unset_timer(&mut self, name: endpoint::TimerId) {
@@ -70,42 +74,48 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
 }
 
 struct Peer {
+    id: PeerId,
     addr: net::SocketAddr,
     endpoint: endpoint::Endpoint,
     timers: PeerTimers,
 }
 
+type PeerRc = Rc<RefCell<Peer>>;
+
 pub struct PeerHandle<'a> {
-    peer: &'a mut Peer,
+    peer_ref: RefMut<'a, Peer>,
     socket: &'a net::UdpSocket,
     timer_wheel: &'a mut TimerWheel,
 }
 
 impl<'a> PeerHandle<'a> {
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        println!("sending packet to {:?}!", self.peer.addr);
-        let _ = self.peer.endpoint.enqueue_packet(packet_bytes, mode);
+        println!("sending packet to {:?}!", self.peer_ref.addr);
+        let _ = self.peer_ref.endpoint.enqueue_packet(packet_bytes, mode);
     }
 
     pub fn flush(&mut self) {
+        let ref mut peer = *self.peer_ref;
+
         let ref mut host_ctx = HostContext {
             socket: &*self.socket,
-            peer_addr: &self.peer.addr,
+            peer_id: peer.id,
+            peer_addr: &peer.addr,
             timer_wheel: &mut self.timer_wheel,
-            timers: &mut self.peer.timers,
+            timers: &mut peer.timers,
         };
 
-        self.peer.endpoint.flush(host_ctx);
+        peer.endpoint.flush(host_ctx);
 
         // flush() generates no events, so no need to poll here
     }
 }
 
 pub enum Event {
-    Connect(net::SocketAddr),
-    Disconnect(net::SocketAddr),
-    Receive(net::SocketAddr, Box<[u8]>),
-    Timeout(net::SocketAddr),
+    Connect(PeerId),
+    Disconnect(PeerId),
+    Receive(PeerId, Box<[u8]>),
+    Timeout(PeerId),
 }
 
 pub struct Server {
@@ -117,7 +127,8 @@ pub struct Server {
 
     recv_buffer: Box<[u8]>,
 
-    peers: HashMap<net::SocketAddr, Peer>,
+    peers_by_id: Vec<Option<PeerRc>>,
+    peers_by_addr: HashMap<net::SocketAddr, PeerRc>,
     peer_count_max: usize,
 
     events: VecDeque<Event>,
@@ -125,6 +136,20 @@ pub struct Server {
     time_ref: time::Instant,
     timer_wheel: TimerWheel,
     timer_data_expired: Vec<PeerTimerData>,
+}
+
+fn find_free_index(peers_by_id: &Vec<Option<PeerRc>>) -> usize {
+    let mut idx = 0;
+    loop {
+        if idx >= peers_by_id.len() {
+            break;
+        }
+        if peers_by_id[idx].is_none() {
+            break;
+        }
+        idx += 1;
+    }
+    idx
 }
 
 impl Server {
@@ -195,59 +220,85 @@ impl Server {
                 let valid = true;
 
                 if valid {
-                    if self.peers.len() < self.peer_count_max
-                        && !self.peers.contains_key(&sender_addr)
+                    if self.peers_by_addr.len() < self.peer_count_max
+                        && !self.peers_by_addr.contains_key(&sender_addr)
                     {
-                        // Associate a new peer object with this address
-                        let peer = Peer {
-                            endpoint: endpoint::Endpoint::new(),
+                        // Generate a new peer ID
+                        let mut idx = find_free_index(&self.peers_by_id);
+                        let id = idx as PeerId;
+
+                        // Create a new peer object
+                        let peer_rc = Rc::new(RefCell::new(Peer {
+                            id,
                             addr: sender_addr.clone(),
+                            endpoint: endpoint::Endpoint::new(),
                             timers: PeerTimers {
                                 rto_timer_id: None,
                                 receive_timer_id: None,
                             },
-                        };
-                        self.peers.insert(sender_addr.clone(), peer);
+                        }));
+
+                        // Associate peer with sender address
+                        self.peers_by_addr
+                            .insert(sender_addr.clone(), Rc::clone(&peer_rc));
+
+                        // Place peer in the ID table
+                        if idx >= self.peers_by_id.len() {
+                            self.peers_by_id.resize(idx + 1, None);
+                        }
+                        self.peers_by_id.insert(idx, Some(peer_rc));
+
+                        // Notify user of inbound connection
+                        self.events.push_back(Event::Connect(id));
 
                         // Set a dummy timer just for fun
                         self.timer_wheel.set_timer(
                             now_ms + 500,
                             PeerTimerData {
-                                peer_addr: sender_addr.clone(),
+                                peer_id: id,
                                 name: endpoint::TimerId::Rto,
                             },
                         );
 
-                        // Notify user of inbound connection
-                        self.events.push_back(Event::Connect(sender_addr.clone()));
+                        println!(
+                            "created client {}, for sender address {:?}",
+                            idx, sender_addr
+                        );
                     }
 
                     // Always send an ack in case a previous ack was dropped.
                     println!("acking phase β...");
                     let _ = self.socket.send_to(&[0xB1], sender_addr);
                 }
-            } else if let Some(peer) = self.peers.get_mut(sender_addr) {
-                let endpoint = &mut peer.endpoint;
-                let address = &mut peer.endpoint;
+            } else if let Some(peer_rc) = self.peers_by_addr.get_mut(sender_addr) {
+                let mut peer_ref = peer_rc.borrow_mut();
+                let ref mut peer = *peer_ref;
+
+                let peer_id = peer.id;
+
+                let ref mut endpoint = peer.endpoint;
 
                 let ref mut host_ctx = HostContext {
                     socket: &*self.socket,
+                    peer_id,
                     peer_addr: sender_addr,
                     timer_wheel: &mut self.timer_wheel,
                     timers: &mut peer.timers,
                 };
 
-                peer.endpoint.handle_frame(frame_bytes, host_ctx);
+                endpoint.handle_frame(frame_bytes, host_ctx);
 
-                while let Some(packet) = peer.endpoint.pop_packet() {
-                    self.events
-                        .push_back(Event::Receive(sender_addr.clone(), packet));
+                while let Some(packet) = endpoint.pop_packet() {
+                    self.events.push_back(Event::Receive(peer_id, packet));
                 }
 
-                if peer.endpoint.is_closed() {
-                    self.events.push_back(Event::Disconnect(sender_addr.clone()));
+                if endpoint.is_closed() {
+                    self.events.push_back(Event::Disconnect(peer_id));
 
-                    self.peers.remove(sender_addr);
+                    std::mem::drop(peer_ref);
+
+                    self.peers_by_addr.remove(sender_addr);
+                    self.peers_by_id[peer_id as usize] = None;
                 }
             }
         } else {
@@ -293,25 +344,38 @@ impl Server {
         for timer_data in self.timer_data_expired.drain(..) {
             println!("Timer expired!");
 
-            if let Some(peer) = self.peers.get_mut(&timer_data.peer_addr) {
+            let peer_id = timer_data.peer_id;
+            let timer_name = timer_data.name;
+
+            if let Some(Some(peer_rc)) = self.peers_by_id.get_mut(peer_id as usize) {
+                let mut peer_ref = peer_rc.borrow_mut();
+                let ref mut peer = *peer_ref;
+
+                let ref mut endpoint = peer.endpoint;
+
                 let ref mut host_ctx = HostContext {
                     socket: &*self.socket,
-                    peer_addr: &timer_data.peer_addr,
+                    peer_id,
+                    peer_addr: &peer.addr,
                     timer_wheel: &mut self.timer_wheel,
                     timers: &mut peer.timers,
                 };
 
-                peer.endpoint.handle_timer(timer_data.name, now_ms, host_ctx);
+                endpoint.handle_timer(timer_name, now_ms, host_ctx);
 
-                while let Some(packet) = peer.endpoint.pop_packet() {
-                    self.events
-                        .push_back(Event::Receive(timer_data.peer_addr.clone(), packet));
+                while let Some(packet) = endpoint.pop_packet() {
+                    self.events.push_back(Event::Receive(peer_id, packet));
                 }
 
-                if peer.endpoint.is_closed() {
-                    self.events.push_back(Event::Disconnect(timer_data.peer_addr.clone()));
+                if endpoint.is_closed() {
+                    let peer_addr = peer.addr.clone();
 
-                    self.peers.remove(&timer_data.peer_addr);
+                    self.events.push_back(Event::Disconnect(peer_id));
+
+                    std::mem::drop(peer_ref);
+
+                    self.peers_by_addr.remove(&peer_addr);
+                    self.peers_by_id[peer_id as usize] = None;
                 }
             }
         }
@@ -358,7 +422,8 @@ impl Server {
 
             recv_buffer: vec![0; max_recv_size].into_boxed_slice(),
 
-            peers: HashMap::new(),
+            peers_by_id: Vec::new(),
+            peers_by_addr: HashMap::new(),
             peer_count_max: max_peers,
 
             events: VecDeque::new(),
@@ -446,18 +511,15 @@ impl Server {
         self.local_addr
     }
 
-    pub fn peer<'a>(&'a mut self, address: &net::SocketAddr) -> Option<PeerHandle<'a>> {
-        // TODO: A peer handle cannot destroy itself if constructed this way. Is it awkward to use
-        // the peer handle for everything but immediate disconnection?
-
-        if let Some(peer) = self.peers.get_mut(address) {
-            Some(PeerHandle {
-                peer,
+    pub fn peer<'a>(&'a mut self, id: PeerId) -> Option<PeerHandle<'a>> {
+        if let Some(Some(peer_rc)) = self.peers_by_id.get_mut(id as usize) {
+            return Some(PeerHandle {
+                peer_ref: peer_rc.borrow_mut(),
                 socket: &self.socket,
                 timer_wheel: &mut self.timer_wheel,
-            })
-        } else {
-            None
+            });
         }
+
+        return None;
     }
 }
