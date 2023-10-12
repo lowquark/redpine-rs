@@ -15,7 +15,6 @@ use std::fmt;
 // mask2: 0b00000111 shift2: 6
 
 type TimerIndex = u32;
-type Handler<T> = fn(&mut TimerWheel<T>, u64, data: T);
 
 #[derive(Clone, Debug)]
 pub struct TimerId {
@@ -47,10 +46,6 @@ pub struct TimerWheel<T> {
     timer_entries: Vec<TimerEntry>,
     free_list: Vec<TimerIndex>,
     last_step_time_ms: u64,
-}
-
-pub struct StepState<T> {
-    expired_data: Vec<T>,
 }
 
 impl TimerEntry {
@@ -375,132 +370,6 @@ impl<T> TimerWheel<T> {
     }
 }
 
-impl<T> StepState<T> {
-    pub fn new() -> Self {
-        Self {
-            expired_data: Vec::new(),
-        }
-    }
-
-    fn expire_all(
-        timer_entries: &mut Vec<TimerEntry>,
-        timer_data: &mut Vec<Option<T>>,
-        free_list: &mut Vec<TimerIndex>,
-        sentinel_timer_idx: u32,
-        expired_data: &mut Vec<T>,
-    ) {
-        let mut timer_idx = timer_entries[sentinel_timer_idx as usize].next_idx;
-
-        while timer_idx != sentinel_timer_idx {
-            let handler = timer_data[timer_idx as usize].take().unwrap();
-            expired_data.push(handler);
-
-            let timer_next_idx = timer_entries[timer_idx as usize].next_idx;
-
-            // timer.next := timer
-            timer_entries[timer_idx as usize].next_idx = timer_idx;
-            // timer.prev := timer
-            timer_entries[timer_idx as usize].prev_idx = timer_idx;
-
-            free_list.push(timer_idx);
-
-            timer_idx = timer_next_idx;
-        }
-
-        timer_entries[sentinel_timer_idx as usize].next_idx = sentinel_timer_idx;
-        timer_entries[sentinel_timer_idx as usize].prev_idx = sentinel_timer_idx;
-    }
-
-    fn expire_expired(
-        timer_entries: &mut Vec<TimerEntry>,
-        timer_data: &mut Vec<Option<T>>,
-        free_list: &mut Vec<TimerIndex>,
-        sentinel_timer_idx: u32,
-        expired_data: &mut Vec<T>,
-        time_now_ms: u64,
-    ) {
-        let mut timer_idx = timer_entries[sentinel_timer_idx as usize].next_idx;
-
-        while timer_idx != sentinel_timer_idx {
-            if timer_entries[timer_idx as usize].timeout_time_ms <= time_now_ms {
-                let handler = timer_data[timer_idx as usize].take().unwrap();
-                expired_data.push(handler);
-
-                let timer_next_idx = timer_entries[timer_idx as usize].next_idx;
-                let timer_prev_idx = timer_entries[timer_idx as usize].prev_idx;
-
-                // timer.prev.next := timer.next
-                timer_entries[timer_prev_idx as usize].next_idx = timer_next_idx;
-                // timer.next.prev := timer.prev
-                timer_entries[timer_next_idx as usize].prev_idx = timer_prev_idx;
-                // timer.next := timer
-                timer_entries[timer_idx as usize].next_idx = timer_idx;
-                // timer.prev := timer
-                timer_entries[timer_idx as usize].prev_idx = timer_idx;
-
-                free_list.push(timer_idx);
-
-                timer_idx = timer_next_idx;
-            } else {
-                let timer_next_idx = timer_entries[timer_idx as usize].next_idx;
-
-                timer_idx = timer_next_idx;
-            }
-        }
-    }
-
-    pub fn step<C>(&mut self, wheel: &mut TimerWheel<T>, time_now_ms: u64, cb: C)
-    where
-        C: Fn(&mut TimerWheel<T>, T),
-    {
-        assert!(
-            time_now_ms >= wheel.last_step_time_ms,
-            "attempt to step in the past"
-        );
-
-        let array_count = wheel.arrays.len();
-
-        for (array_idx, array) in wheel.arrays.iter_mut().enumerate() {
-            let time_now_idx = time_now_ms >> array.bin_time_shift;
-
-            let end_idx = u64::min(time_now_idx, array.next_abs_bin_idx + array.size);
-
-            for bin_idx in array.next_abs_bin_idx..end_idx {
-                let true_bin_idx = bin_idx & array.bin_time_mask;
-
-                let sentinel_timer_idx = array.timer_indices.start + true_bin_idx as u32;
-
-                if array_idx < array_count - 1 {
-                    Self::expire_all(
-                        &mut wheel.timer_entries,
-                        &mut wheel.timer_data,
-                        &mut wheel.free_list,
-                        sentinel_timer_idx,
-                        &mut self.expired_data,
-                    );
-                } else {
-                    Self::expire_expired(
-                        &mut wheel.timer_entries,
-                        &mut wheel.timer_data,
-                        &mut wheel.free_list,
-                        sentinel_timer_idx,
-                        &mut self.expired_data,
-                        time_now_ms,
-                    );
-                }
-            }
-
-            array.next_abs_bin_idx = time_now_idx;
-        }
-
-        for data in self.expired_data.drain(..) {
-            (cb)(wheel, data);
-        }
-
-        wheel.last_step_time_ms = time_now_ms;
-    }
-}
-
 fn debug_fmt_row<T>(
     wheel: &TimerWheel<T>,
     timer_idx: u32,
@@ -626,7 +495,7 @@ mod tests {
 
     struct TestHarness {
         wheel: TimerWheel<Rc<RefCell<TimerState>>>,
-        step_state: StepState<Rc<RefCell<TimerState>>>,
+        expired_data: Vec<Rc<RefCell<TimerState>>>,
         timers: Vec<Rc<RefCell<TimerState>>>,
         last_step_time_ms: u64,
     }
@@ -651,11 +520,10 @@ mod tests {
 
         fn new() -> Self {
             let wheel = TimerWheel::new(&TEST_ARRAY_CONFIG, 0);
-            let step_state = StepState::new();
 
             Self {
                 wheel,
-                step_state,
+                expired_data: Vec::new(),
                 timers: Vec::new(),
                 last_step_time_ms: 0,
             }
@@ -710,15 +578,16 @@ mod tests {
         fn step(&mut self, interval_ms: u64) {
             let time_now_ms = self.last_step_time_ms + interval_ms;
 
-            self.step_state
-                .step(&mut self.wheel, time_now_ms, |timer_wheel, state| {
-                    let mut state_ref = state.borrow_mut();
-                    // Only timers which have passed their expire time should be handled
-                    assert!(time_now_ms >= state_ref.expire_time_ms);
-                    // Only timers which have not yet been handled (nor unset) should be handled
-                    assert!(state_ref.id.is_some());
-                    state_ref.id = None;
-                });
+            self.wheel.step(time_now_ms, &mut self.expired_data);
+
+            for state in self.expired_data.drain(..) {
+                let mut state_ref = state.borrow_mut();
+                // Only timers which have passed their expire time should be handled
+                assert!(time_now_ms >= state_ref.expire_time_ms);
+                // Only timers which have not yet been handled (nor unset) should be handled
+                assert!(state_ref.id.is_some());
+                state_ref.id = None;
+            };
 
             self.validate();
 
@@ -744,13 +613,15 @@ mod tests {
     #[test]
     fn basic_unset() {
         let mut wheel = TimerWheel::<()>::new(&TEST_ARRAY_CONFIG, 0);
-        let mut step_state = StepState::<()>::new();
+        let mut expired_data = Vec::new();
 
         let timer_id = wheel.set_timer(0, ());
 
         wheel.unset_timer(timer_id);
 
-        step_state.step(&mut wheel, 8, |_, _| panic!());
+        wheel.step(8, &mut expired_data);
+
+        assert_eq!(expired_data.len(), 0);
     }
 
     #[test]
@@ -834,7 +705,7 @@ mod tests {
         type CountRc = Rc<RefCell<u64>>;
 
         let mut wheel = TimerWheel::<CountRc>::new(&TEST_ARRAY_CONFIG, 0);
-        let mut step_state = StepState::<CountRc>::new();
+        let mut expired_data = Vec::<CountRc>::new();
 
         let count_rc = Rc::new(RefCell::new(0));
 
@@ -843,7 +714,9 @@ mod tests {
         for step_idx in 0..STEP_COUNT {
             let time_now_ms = (step_idx + 1) * MIN_RESOLUTION_MS;
 
-            step_state.step(&mut wheel, time_now_ms, |wheel, count_rc| {
+            wheel.step(time_now_ms, &mut expired_data);
+
+            for count_rc in expired_data.drain(..) {
                 let mut count_ref = count_rc.borrow_mut();
 
                 assert_eq!(time_now_ms, (*count_ref + 1) * MIN_RESOLUTION_MS);
@@ -856,7 +729,7 @@ mod tests {
                     // In order to fire MIN_RESOLUTION_MS from now, schedule for the current bin
                     wheel.set_timer(time_now_ms, count_rc);
                 }
-            });
+            };
         }
 
         assert_eq!(*count_rc.borrow(), RESCHEDULE_COUNT);
@@ -870,7 +743,7 @@ mod tests {
         static BIN_SIZE_MS: u64 = TEST_ARRAY_CONFIG[0].ms_per_bin as u64;
 
         let mut wheel = TimerWheel::<()>::new(&TEST_ARRAY_CONFIG, 0);
-        let mut step_state = StepState::<()>::new();
+        let mut expired_data = Vec::new();
 
         assert_eq!(wheel.next_expiration_time_ms(), None);
 
@@ -878,7 +751,7 @@ mod tests {
 
         assert_eq!(wheel.next_expiration_time_ms(), Some(2 * BIN_SIZE_MS));
 
-        step_state.step(&mut wheel, 2 * BIN_SIZE_MS, |_, _| ());
+        wheel.step(2 * BIN_SIZE_MS, &mut expired_data);
 
         assert_eq!(wheel.next_expiration_time_ms(), None);
     }
@@ -889,7 +762,7 @@ mod tests {
         // behavior.
 
         let mut wheel = TimerWheel::<()>::new(&TEST_ARRAY_CONFIG, 0);
-        let mut step_state = StepState::<()>::new();
+        let mut expired_data = Vec::new();
 
         static SPAN_MS: u64 =
             ((TEST_ARRAY_CONFIG[2].size) * TEST_ARRAY_CONFIG[2].ms_per_bin) as u64;
@@ -901,12 +774,12 @@ mod tests {
         assert_eq!(wheel.next_expiration_time_ms(), Some(EXPIRATION_PRE));
 
         // Verify that the new expiration is correct after advancing past the aliased bin
-        step_state.step(&mut wheel, EXPIRATION_PRE, |_, _| ());
+        wheel.step(EXPIRATION_PRE, &mut expired_data);
 
         assert_eq!(wheel.next_expiration_time_ms(), Some(EXPIRATION_POST));
 
         // Veirfy wheel reports no known expiration after expiring all
-        step_state.step(&mut wheel, EXPIRATION_POST, |_, _| ());
+        wheel.step(EXPIRATION_POST, &mut expired_data);
 
         assert_eq!(wheel.next_expiration_time_ms(), None);
     }
@@ -925,12 +798,12 @@ mod tests {
 
         for _ in 0..TRIAL_COUNT {
             let mut wheel = TimerWheel::<()>::new(&TEST_ARRAY_CONFIG, 0);
-            let mut step_state = StepState::<()>::new();
+            let mut expired_data = Vec::new();
 
             // Advance to a random time
             let mut step_time_ms = rand::random::<u64>() / 2;
 
-            step_state.step(&mut wheel, step_time_ms, |_, _| ());
+            wheel.step(step_time_ms, &mut expired_data);
 
             // Set TIMER_COUNT random timers within the test range
             let timeout_times = (0..TIMER_COUNT)
@@ -960,7 +833,7 @@ mod tests {
             assert_eq!(wheel.next_expiration_time_ms(), Some(min_expire_time));
 
             // Veirfy wheel reports no known expiration after expiring all
-            step_state.step(&mut wheel, max_expire_time, |_, _| ());
+            wheel.step(max_expire_time, &mut expired_data);
 
             assert_eq!(wheel.next_expiration_time_ms(), None);
         }
