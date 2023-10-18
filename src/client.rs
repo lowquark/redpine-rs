@@ -10,8 +10,6 @@ const SOCKET_POLLING_KEY: usize = 0;
 const SYN_TIMEOUT_MS: u64 = 2000;
 const HANDSHAKE_TIMEOUT_MS: u64 = 10000;
 
-const MAX_FRAME_SIZE: usize = 1478;
-
 enum HandshakePhase {
     Alpha,
     Beta,
@@ -103,6 +101,11 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
 }
 
 impl Client {
+    /// Returns the number of whole milliseconds elapsed since the client object was created.
+    fn time_now_ms(&self) -> u64 {
+        (time::Instant::now() - self.time_ref).as_millis() as u64
+    }
+
     /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
     /// otherwise.
     fn try_read_frame(&mut self) -> std::io::Result<Option<usize>> {
@@ -140,7 +143,7 @@ impl Client {
     }
 
     fn process_frame(&mut self, frame_size: usize) {
-        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+        let now_ms = self.time_now_ms();
 
         let frame_bytes = &self.recv_buffer[..frame_size];
 
@@ -223,7 +226,7 @@ impl Client {
 
     /// Returns the time remaining until the next timer expires.
     fn next_timer_timeout(&self) -> Option<time::Duration> {
-        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+        let now_ms = self.time_now_ms();
 
         let mut timeout_ms = None;
 
@@ -240,7 +243,6 @@ impl Client {
         }
 
         if let Some(t_ms) = timeout_ms {
-            // TODO: Is it possible that reporting a duration this way can skip timer events?
             return Some(time::Duration::from_millis(t_ms - now_ms));
         }
 
@@ -296,7 +298,7 @@ impl Client {
     }
 
     fn process_timeouts(&mut self) {
-        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+        let now_ms = self.time_now_ms();
 
         let timer_ids = [endpoint::TimerId::Rto, endpoint::TimerId::Receive];
 
@@ -320,10 +322,14 @@ impl Client {
     where
         A: net::ToSocketAddrs,
     {
+        let frame_size_max: usize = 1478;
+
         let bind_address = (std::net::Ipv4Addr::UNSPECIFIED, 0);
+
         let socket = net::UdpSocket::bind(bind_address)?;
         socket.set_nonblocking(true)?;
         socket.connect(server_addr)?;
+
         let local_addr = socket.local_addr()?;
         let peer_addr = socket.peer_addr()?;
 
@@ -344,7 +350,7 @@ impl Client {
             poller,
             poller_events: polling::Events::new(),
 
-            recv_buffer: vec![0; MAX_FRAME_SIZE].into_boxed_slice(),
+            recv_buffer: vec![0; frame_size_max].into_boxed_slice(),
 
             events: VecDeque::new(),
 

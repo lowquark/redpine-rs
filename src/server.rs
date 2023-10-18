@@ -13,6 +13,21 @@ type PeerId = u32;
 
 const SOCKET_POLLING_KEY: usize = 0;
 
+const TIMER_WHEEL_ARRAY_CONFIG: [timer_wheel::ArrayConfig; 3] = [
+    timer_wheel::ArrayConfig {
+        size: 32,
+        ms_per_bin: 4,
+    },
+    timer_wheel::ArrayConfig {
+        size: 32,
+        ms_per_bin: 4 * 8,
+    },
+    timer_wheel::ArrayConfig {
+        size: 32,
+        ms_per_bin: 4 * 8 * 8,
+    },
+];
+
 struct PeerTimerData {
     peer_id: PeerId,
     name: endpoint::TimerId,
@@ -80,6 +95,20 @@ struct Peer {
     timers: PeerTimers,
 }
 
+impl Peer {
+    fn new(id: PeerId, addr: net::SocketAddr) -> Self {
+        Self {
+            id,
+            addr,
+            endpoint: endpoint::Endpoint::new(),
+            timers: PeerTimers {
+                rto_timer_id: None,
+                receive_timer_id: None,
+            },
+        }
+    }
+}
+
 type PeerRc = Rc<RefCell<Peer>>;
 
 pub struct PeerHandle<'a> {
@@ -138,21 +167,28 @@ pub struct Server {
     timer_data_expired: Vec<PeerTimerData>,
 }
 
-fn find_free_index(peers_by_id: &Vec<Option<PeerRc>>) -> usize {
+fn find_free_index(peers_by_id: &Vec<Option<PeerRc>>) -> Option<usize> {
     let mut idx = 0;
-    loop {
-        if idx >= peers_by_id.len() {
-            break;
-        }
+
+    for idx in 0..peers_by_id.len() {
         if peers_by_id[idx].is_none() {
-            break;
+            return Some(idx);
         }
-        idx += 1;
     }
-    idx
+
+    return None;
+}
+
+fn new_peer_rc(id: PeerId, addr: net::SocketAddr) -> PeerRc {
+    Rc::new(RefCell::new(Peer::new(id, addr)))
 }
 
 impl Server {
+    /// Returns the number of whole milliseconds elapsed since the server object was created.
+    fn time_now_ms(&self) -> u64 {
+        (time::Instant::now() - self.time_ref).as_millis() as u64
+    }
+
     /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
     /// otherwise.
     fn try_read_frame(&mut self) -> std::io::Result<Option<(usize, net::SocketAddr)>> {
@@ -190,7 +226,7 @@ impl Server {
     }
 
     fn process_frame(&mut self, frame_size: usize, sender_addr: &net::SocketAddr) {
-        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+        let now_ms = self.time_now_ms();
 
         let ref frame_bytes = self.recv_buffer[..frame_size];
 
@@ -224,29 +260,18 @@ impl Server {
                         && !self.peers_by_addr.contains_key(&sender_addr)
                     {
                         // Generate a new peer ID
-                        let mut idx = find_free_index(&self.peers_by_id);
+                        let mut idx = find_free_index(&self.peers_by_id).expect("size mismatch");
                         let id = idx as PeerId;
 
                         // Create a new peer object
-                        let peer_rc = Rc::new(RefCell::new(Peer {
-                            id,
-                            addr: sender_addr.clone(),
-                            endpoint: endpoint::Endpoint::new(),
-                            timers: PeerTimers {
-                                rto_timer_id: None,
-                                receive_timer_id: None,
-                            },
-                        }));
+                        let peer_rc = new_peer_rc(id, sender_addr.clone());
 
                         // Associate peer with sender address
                         self.peers_by_addr
                             .insert(sender_addr.clone(), Rc::clone(&peer_rc));
 
                         // Place peer in the ID table
-                        if idx >= self.peers_by_id.len() {
-                            self.peers_by_id.resize(idx + 1, None);
-                        }
-                        self.peers_by_id.insert(idx, Some(peer_rc));
+                        self.peers_by_id[idx] = Some(peer_rc);
 
                         // Notify user of inbound connection
                         self.events.push_back(Event::Connect(id));
@@ -327,17 +352,30 @@ impl Server {
 
     /// Returns the time remaining until the next timer expires.
     fn next_timer_timeout(&self) -> Option<time::Duration> {
-        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+        // WLOG, assume the time reference is zero. All units are ms, and `_ms` denotes an integer
+        // timestamp as is convention in the code.
+        //
+        //   1: t_now_ms = floor(t_now) ≤ t_now
+        //   1: t_now - t_now_ms ≥ 0
+        //   2: t_wake ≥ t_now + (t_expire_ms - t_now_ms)
+        //   2: t_wake ≥ (t_now - t_now_ms) + t_expire_ms
+        // 2∘1: t_wake ≥ t_expire_ms
+        // 2∘1: floor(t_wake) ≥ floor(t_expire_ms) = t_expire_ms
+        // 2∘1: t_wake_ms ≥ t_expire_ms
+        //
+        // Since t_wake will round to a minimum of t_expire_ms, we will not skip a timer by waking
+        // too soon.
 
-        // TODO: Is it possible that reporting a duration this way can skip timer events?
+        let now_ms = self.time_now_ms();
+
         return self
             .timer_wheel
             .next_expiration_time_ms()
-            .map(|time_ms| time::Duration::from_millis(time_ms - now_ms));
+            .map(|expire_time_ms| time::Duration::from_millis(expire_time_ms - now_ms));
     }
 
     fn process_timeouts(&mut self) {
-        let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
+        let now_ms = self.time_now_ms();
 
         self.timer_wheel.step(now_ms, &mut self.timer_data_expired);
 
@@ -385,8 +423,15 @@ impl Server {
     where
         A: net::ToSocketAddrs,
     {
+        let frame_size_max: usize = 1478;
+        let peer_count_max: usize = 8192;
+
+        assert!(peer_count_max > 0);
+        assert!(peer_count_max - 1 <= PeerId::max_value() as usize);
+
         let socket = net::UdpSocket::bind(bind_addr)?;
         socket.set_nonblocking(true)?;
+
         let local_addr = socket.local_addr()?;
 
         let poller = polling::Poller::new()?;
@@ -395,24 +440,6 @@ impl Server {
             poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
         }
 
-        let max_recv_size: usize = 1478;
-        let max_peers: usize = 8192;
-
-        static TIMER_WHEEL_ARRAY_CONFIG: [timer_wheel::ArrayConfig; 3] = [
-            timer_wheel::ArrayConfig {
-                size: 32,
-                ms_per_bin: 4,
-            },
-            timer_wheel::ArrayConfig {
-                size: 32,
-                ms_per_bin: 4 * 8,
-            },
-            timer_wheel::ArrayConfig {
-                size: 32,
-                ms_per_bin: 4 * 8 * 8,
-            },
-        ];
-
         Ok(Self {
             socket: Rc::new(socket),
             local_addr,
@@ -420,11 +447,11 @@ impl Server {
             poller,
             poller_events: polling::Events::new(),
 
-            recv_buffer: vec![0; max_recv_size].into_boxed_slice(),
+            recv_buffer: vec![0; frame_size_max].into_boxed_slice(),
 
-            peers_by_id: Vec::new(),
+            peers_by_id: vec![None; peer_count_max],
             peers_by_addr: HashMap::new(),
-            peer_count_max: max_peers,
+            peer_count_max,
 
             events: VecDeque::new(),
 

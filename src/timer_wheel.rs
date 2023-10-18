@@ -587,7 +587,7 @@ mod tests {
                 // Only timers which have not yet been handled (nor unset) should be handled
                 assert!(state_ref.id.is_some());
                 state_ref.id = None;
-            };
+            }
 
             self.validate();
 
@@ -729,7 +729,7 @@ mod tests {
                     // In order to fire MIN_RESOLUTION_MS from now, schedule for the current bin
                     wheel.set_timer(time_now_ms, count_rc);
                 }
-            };
+            }
         }
 
         assert_eq!(*count_rc.borrow(), RESCHEDULE_COUNT);
