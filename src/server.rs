@@ -151,8 +151,8 @@ pub struct Server {
 
     recv_buffer: Box<[u8]>,
 
-    peers_by_id: Vec<Option<Peer>>,
-    peers_by_addr: HashMap<net::SocketAddr, PeerId>,
+    peer_table: Vec<Option<Peer>>,
+    address_table: HashMap<net::SocketAddr, PeerId>,
     peer_count_max: usize,
 
     events: VecDeque<Event>,
@@ -162,11 +162,11 @@ pub struct Server {
     timer_data_expired: Vec<PeerTimerData>,
 }
 
-fn find_free_index(peers_by_id: &Vec<Option<Peer>>) -> Option<usize> {
+fn find_free_index(peer_table: &Vec<Option<Peer>>) -> Option<usize> {
     let mut idx = 0;
 
-    for idx in 0..peers_by_id.len() {
-        if peers_by_id[idx].is_none() {
+    for idx in 0..peer_table.len() {
+        if peer_table[idx].is_none() {
             return Some(idx);
         }
     }
@@ -247,21 +247,21 @@ impl Server {
                 let valid = true;
 
                 if valid {
-                    if self.peers_by_addr.len() < self.peer_count_max
-                        && !self.peers_by_addr.contains_key(&sender_addr)
+                    if self.address_table.len() < self.peer_count_max
+                        && !self.address_table.contains_key(&sender_addr)
                     {
                         // Generate a new peer ID
-                        let mut idx = find_free_index(&self.peers_by_id).expect("size mismatch");
+                        let mut idx = find_free_index(&self.peer_table).expect("size mismatch");
                         let id = idx as PeerId;
 
                         // Create a new peer object
                         let peer = Peer::new(id, sender_addr.clone());
 
                         // Place peer in the ID table
-                        self.peers_by_id[idx] = Some(peer);
+                        self.peer_table[idx] = Some(peer);
 
                         // Associate peer with sender address
-                        self.peers_by_addr.insert(sender_addr.clone(), id);
+                        self.address_table.insert(sender_addr.clone(), id);
 
                         // Notify user of inbound connection
                         self.events.push_back(Event::Connect(id));
@@ -285,8 +285,8 @@ impl Server {
                     println!("acking phase β...");
                     let _ = self.socket.send_to(&[0xB1], sender_addr);
                 }
-            } else if let Some(&peer_id) = self.peers_by_addr.get(sender_addr) {
-                if let Some(Some(peer)) = self.peers_by_id.get_mut(peer_id as usize) {
+            } else if let Some(&peer_id) = self.address_table.get(sender_addr) {
+                if let Some(Some(peer)) = self.peer_table.get_mut(peer_id as usize) {
                     let ref mut endpoint = peer.endpoint;
 
                     let ref mut host_ctx = HostContext {
@@ -306,8 +306,8 @@ impl Server {
                     if endpoint.is_closed() {
                         self.events.push_back(Event::Disconnect(peer_id));
 
-                        self.peers_by_addr.remove(sender_addr);
-                        self.peers_by_id[peer_id as usize] = None;
+                        self.address_table.remove(sender_addr);
+                        self.peer_table[peer_id as usize] = None;
                     }
                 }
             }
@@ -370,7 +370,7 @@ impl Server {
             let peer_id = timer_data.peer_id;
             let timer_name = timer_data.name;
 
-            if let Some(Some(peer)) = self.peers_by_id.get_mut(peer_id as usize) {
+            if let Some(Some(peer)) = self.peer_table.get_mut(peer_id as usize) {
                 let ref mut endpoint = peer.endpoint;
 
                 let ref mut host_ctx = HostContext {
@@ -392,8 +392,8 @@ impl Server {
 
                     self.events.push_back(Event::Disconnect(peer_id));
 
-                    self.peers_by_addr.remove(&peer_addr);
-                    self.peers_by_id[peer_id as usize] = None;
+                    self.address_table.remove(&peer_addr);
+                    self.peer_table[peer_id as usize] = None;
                 }
             }
         }
@@ -420,7 +420,7 @@ impl Server {
             poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
         }
 
-        let peers_by_id = (0..peer_count_max).map(|_| None).collect::<Vec<_>>();
+        let peer_table = (0..peer_count_max).map(|_| None).collect::<Vec<_>>();
 
         Ok(Self {
             socket: Rc::new(socket),
@@ -431,8 +431,8 @@ impl Server {
 
             recv_buffer: vec![0; frame_size_max].into_boxed_slice(),
 
-            peers_by_id,
-            peers_by_addr: HashMap::new(),
+            peer_table,
+            address_table: HashMap::new(),
             peer_count_max,
 
             events: VecDeque::new(),
@@ -521,7 +521,7 @@ impl Server {
     }
 
     pub fn peer<'a>(&'a mut self, id: PeerId) -> Option<PeerHandle<'a>> {
-        if let Some(Some(peer)) = self.peers_by_id.get_mut(id as usize) {
+        if let Some(Some(peer)) = self.peer_table.get_mut(id as usize) {
             return Some(PeerHandle {
                 peer,
                 socket: &self.socket,
