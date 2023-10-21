@@ -203,196 +203,198 @@ impl PeerTable {
     }
 }
 
-fn process_handshake_alpha(
-    core: &mut ServerCore,
-    peer_table: &mut PeerTable,
-    sender_addr: &net::SocketAddr,
-) {
-    println!("acking phase α...");
-    let _ = core.socket.send_to(&[0xA1], sender_addr);
-}
-
-fn process_handshake_beta(
-    core: &mut ServerCore,
-    peer_table: &mut PeerTable,
-    sender_addr: &net::SocketAddr,
-    now_ms: u64,
-) {
-    if let Some(new_peer_id) = peer_table.insert(sender_addr) {
-        // Notify user of inbound connection
-        core.events.push_back(Event::Connect(new_peer_id));
-
-        // Set a dummy timer just for fun
-        core.timer_wheel.set_timer(
-            now_ms + 500,
-            PeerTimerData {
-                peer_id: new_peer_id,
-                name: endpoint::TimerId::Rto,
-            },
-        );
-
-        println!(
-            "created peer {}, for sender address {:?}",
-            new_peer_id, sender_addr
-        );
+impl ServerCore {
+    fn process_handshake_alpha(
+        &mut self,
+        peer_table: &mut PeerTable,
+        sender_addr: &net::SocketAddr,
+    ) {
+        println!("acking phase α...");
+        let _ = self.socket.send_to(&[0xA1], sender_addr);
     }
 
-    // Always send an ack in case a previous ack was dropped.
-    println!("acking phase β...");
-    let _ = core.socket.send_to(&[0xB1], sender_addr);
-}
+    fn process_handshake_beta(
+        &mut self,
+        peer_table: &mut PeerTable,
+        sender_addr: &net::SocketAddr,
+        now_ms: u64,
+    ) {
+        if let Some(new_peer_id) = peer_table.insert(sender_addr) {
+            // Notify user of inbound connection
+            self.events.push_back(Event::Connect(new_peer_id));
 
-fn process_peer_frame(
-    core: &mut ServerCore,
-    peer_table: &mut PeerTable,
-    sender_addr: &net::SocketAddr,
-    frame_bytes: &[u8],
-    now_ms: u64,
-) {
-    if let Some(peer) = peer_table.find_mut(sender_addr) {
-        let peer_id = peer.core.id;
-        let ref mut endpoint = peer.endpoint;
+            // Set a dummy timer just for fun
+            self.timer_wheel.set_timer(
+                now_ms + 500,
+                PeerTimerData {
+                    peer_id: new_peer_id,
+                    name: endpoint::TimerId::Rto,
+                },
+            );
 
-        let ref mut host_ctx = HostContext::new(core, &mut peer.core);
-
-        endpoint.handle_frame(frame_bytes, host_ctx);
-
-        while let Some(packet) = endpoint.pop_packet() {
-            core.events.push_back(Event::Receive(peer_id, packet));
+            println!(
+                "created peer {}, for sender address {:?}",
+                new_peer_id, sender_addr
+            );
         }
 
-        if endpoint.is_closed() {
-            core.events.push_back(Event::Disconnect(peer_id));
-
-            peer_table.remove(peer_id);
-        }
+        // Always send an ack in case a previous ack was dropped.
+        println!("acking phase β...");
+        let _ = self.socket.send_to(&[0xB1], sender_addr);
     }
-}
 
-fn process_frame(
-    core: &mut ServerCore,
-    peer_table: &mut PeerTable,
-    frame_bytes: &[u8],
-    sender_addr: &net::SocketAddr,
-    now_ms: u64,
-) {
-    println!(
-        "received a packet of length {} from {:?}",
-        frame_bytes.len(),
-        sender_addr
-    );
-    println!("{:02X?}", frame_bytes);
+    fn process_peer_frame(
+        &mut self,
+        peer_table: &mut PeerTable,
+        sender_addr: &net::SocketAddr,
+        frame_bytes: &[u8],
+        now_ms: u64,
+    ) {
+        if let Some(peer) = peer_table.find_mut(sender_addr) {
+            let peer_id = peer.core.id;
+            let ref mut endpoint = peer.endpoint;
 
-    let crc_valid = true;
+            let ref mut host_ctx = HostContext::new(self, &mut peer.core);
 
-    if crc_valid {
-        // Initial handshakes are handled without an allocation in the peer table. Once a valid
-        // open request is received, the sender's address is assumed valid (i.e. blockable) and
-        // an entry in the peer table is created. Other frame types are handled by the
-        // associated peer object.
+            endpoint.handle_frame(frame_bytes, host_ctx);
 
-        if frame_bytes == [0xA0] {
-            let valid = true;
-
-            if valid {
-                process_handshake_alpha(core, peer_table, sender_addr);
+            while let Some(packet) = endpoint.pop_packet() {
+                self.events.push_back(Event::Receive(peer_id, packet));
             }
-        } else if frame_bytes == [0xB0] {
-            let valid = true;
 
-            if valid {
-                process_handshake_beta(core, peer_table, sender_addr, now_ms);
+            if endpoint.is_closed() {
+                self.events.push_back(Event::Disconnect(peer_id));
+
+                peer_table.remove(peer_id);
+            }
+        }
+    }
+
+    fn process_frame(
+        &mut self,
+        peer_table: &mut PeerTable,
+        frame_bytes: &[u8],
+        sender_addr: &net::SocketAddr,
+        now_ms: u64,
+    ) {
+        println!(
+            "received a packet of length {} from {:?}",
+            frame_bytes.len(),
+            sender_addr
+        );
+        println!("{:02X?}", frame_bytes);
+
+        let crc_valid = true;
+
+        if crc_valid {
+            // Initial handshakes are handled without an allocation in the peer table. Once a valid
+            // open request is received, the sender's address is assumed valid (i.e. blockable) and
+            // an entry in the peer table is created. Other frame types are handled by the
+            // associated peer object.
+
+            if frame_bytes == [0xA0] {
+                let valid = true;
+
+                if valid {
+                    self.process_handshake_alpha(peer_table, sender_addr);
+                }
+            } else if frame_bytes == [0xB0] {
+                let valid = true;
+
+                if valid {
+                    self.process_handshake_beta(peer_table, sender_addr, now_ms);
+                }
+            } else {
+                let valid = true;
+
+                if valid {
+                    self.process_peer_frame(peer_table, sender_addr, frame_bytes, now_ms);
+                }
             }
         } else {
-            let valid = true;
+            // We don't negotiate with entropy
+        }
+    }
 
-            if valid {
-                process_peer_frame(core, peer_table, sender_addr, frame_bytes, now_ms);
+    fn process_timeout(
+        &mut self,
+        peer_table: &mut PeerTable,
+        peer_id: PeerId,
+        timer_name: endpoint::TimerId,
+        now_ms: u64,
+    ) {
+        if let Some(peer) = peer_table.get_mut(peer_id) {
+            let peer_id = peer.core.id;
+
+            let ref mut endpoint = peer.endpoint;
+
+            let ref mut host_ctx = HostContext::new(self, &mut peer.core);
+
+            endpoint.handle_timer(timer_name, now_ms, host_ctx);
+
+            while let Some(packet) = endpoint.pop_packet() {
+                self.events.push_back(Event::Receive(peer_id, packet));
+            }
+
+            if endpoint.is_closed() {
+                self.events.push_back(Event::Disconnect(peer_id));
+
+                peer_table.remove(peer_id);
             }
         }
-    } else {
-        // We don't negotiate with entropy
     }
-}
 
-fn process_timeout(
-    core: &mut ServerCore,
-    peer_table: &mut PeerTable,
-    peer_id: PeerId,
-    timer_name: endpoint::TimerId,
-    now_ms: u64,
-) {
-    if let Some(peer) = peer_table.get_mut(peer_id) {
-        let peer_id = peer.core.id;
-
-        let ref mut endpoint = peer.endpoint;
-
-        let ref mut host_ctx = HostContext::new(core, &mut peer.core);
-
-        endpoint.handle_timer(timer_name, now_ms, host_ctx);
-
-        while let Some(packet) = endpoint.pop_packet() {
-            core.events.push_back(Event::Receive(peer_id, packet));
+    fn send(
+        &mut self,
+        peer_table: &mut PeerTable,
+        peer_id: PeerId,
+        packet_bytes: Box<[u8]>,
+        mode: SendMode,
+    ) {
+        if let Some(peer) = peer_table.get_mut(peer_id) {
+            println!("sending packet to {:?}!", peer.core.addr);
+            let _ = peer.endpoint.enqueue_packet(packet_bytes, mode);
         }
+    }
 
-        if endpoint.is_closed() {
-            core.events.push_back(Event::Disconnect(peer_id));
+    fn flush(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
+        if let Some(peer) = peer_table.get_mut(peer_id) {
+            let peer_id = peer.core.id;
 
+            let ref mut endpoint = peer.endpoint;
+
+            let ref mut host_ctx = HostContext::new(self, &mut peer.core);
+
+            endpoint.flush(host_ctx);
+
+            while let Some(packet) = endpoint.pop_packet() {
+                self.events.push_back(Event::Receive(peer_id, packet));
+            }
+
+            if endpoint.is_closed() {
+                self.events.push_back(Event::Disconnect(peer_id));
+
+                peer_table.remove(peer_id);
+            }
+        }
+    }
+
+    fn disconnect(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
+        if let Some(peer) = peer_table.get_mut(peer_id) {
+            let peer_id = peer.core.id;
+
+            let ref mut endpoint = peer.endpoint;
+
+            let ref mut host_ctx = HostContext::new(self, &mut peer.core);
+
+            endpoint.disconnect();
+        }
+    }
+
+    fn drop(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
+        if let Some(peer) = peer_table.get_mut(peer_id) {
             peer_table.remove(peer_id);
         }
-    }
-}
-
-fn send(
-    core: &mut ServerCore,
-    peer_table: &mut PeerTable,
-    peer_id: PeerId,
-    packet_bytes: Box<[u8]>,
-    mode: SendMode,
-) {
-    if let Some(peer) = peer_table.get_mut(peer_id) {
-        println!("sending packet to {:?}!", peer.core.addr);
-        let _ = peer.endpoint.enqueue_packet(packet_bytes, mode);
-    }
-}
-
-fn flush(core: &mut ServerCore, peer_table: &mut PeerTable, peer_id: PeerId) {
-    if let Some(peer) = peer_table.get_mut(peer_id) {
-        let peer_id = peer.core.id;
-
-        let ref mut endpoint = peer.endpoint;
-
-        let ref mut host_ctx = HostContext::new(core, &mut peer.core);
-
-        endpoint.flush(host_ctx);
-
-        while let Some(packet) = endpoint.pop_packet() {
-            core.events.push_back(Event::Receive(peer_id, packet));
-        }
-
-        if endpoint.is_closed() {
-            core.events.push_back(Event::Disconnect(peer_id));
-
-            peer_table.remove(peer_id);
-        }
-    }
-}
-
-fn disconnect(core: &mut ServerCore, peer_table: &mut PeerTable, peer_id: PeerId) {
-    if let Some(peer) = peer_table.get_mut(peer_id) {
-        let peer_id = peer.core.id;
-
-        let ref mut endpoint = peer.endpoint;
-
-        let ref mut host_ctx = HostContext::new(core, &mut peer.core);
-
-        endpoint.disconnect();
-    }
-}
-
-fn drop(core: &mut ServerCore, peer_table: &mut PeerTable, peer_id: PeerId) {
-    if let Some(peer) = peer_table.get_mut(peer_id) {
-        peer_table.remove(peer_id);
     }
 }
 
@@ -414,7 +416,9 @@ impl SocketReceiver {
 
     /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
     /// otherwise.
-    pub fn try_read_frame<'a>(&'a mut self) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
+    pub fn try_read_frame<'a>(
+        &'a mut self,
+    ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
         match self.socket.recv_from(&mut self.recv_buffer) {
             Ok((frame_len, sender_addr)) => {
                 let ref frame_bytes = self.recv_buffer[..frame_len];
@@ -436,10 +440,8 @@ impl SocketReceiver {
     ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
         // Wait for a readable event (must be done prior to each wait() call)
         // TODO: Does this work if the socket is already readable?
-        self.poller.modify(
-            &*self.socket,
-            polling::Event::readable(SOCKET_POLLING_KEY),
-        )?;
+        self.poller
+            .modify(&*self.socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
 
         self.poller_events.clear();
 
@@ -463,9 +465,10 @@ impl Server {
     fn process_timeouts(&mut self) {
         let now_ms = self.time_now_ms();
 
-        let mut core_ref = self.core.borrow_mut();
-
-        core_ref.timer_wheel.step(now_ms, &mut self.timer_data_expired);
+        self.core
+            .borrow_mut()
+            .timer_wheel
+            .step(now_ms, &mut self.timer_data_expired);
 
         for timer_data in self.timer_data_expired.drain(..) {
             println!("Timer expired!");
@@ -473,8 +476,7 @@ impl Server {
             let peer_id = timer_data.peer_id;
             let timer_name = timer_data.name;
 
-            process_timeout(
-                &mut *core_ref,
+            self.core.borrow_mut().process_timeout(
                 &mut self.peer_table,
                 peer_id,
                 timer_name,
@@ -489,10 +491,7 @@ impl Server {
             // Process this frame
             let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
 
-            let mut core_ref = self.core.borrow_mut();
-
-            process_frame(
-                &mut *core_ref,
+            self.core.borrow_mut().process_frame(
                 &mut self.peer_table,
                 frame_bytes,
                 &sender_addr,
@@ -508,17 +507,12 @@ impl Server {
             // Process this frame
             let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
 
-            let mut core_ref = self.core.borrow_mut();
-
-            process_frame(
-                &mut *core_ref,
+            self.core.borrow_mut().process_frame(
                 &mut self.peer_table,
                 frame_bytes,
                 &sender_addr,
                 now_ms,
             );
-
-            std::mem::drop(core_ref);
 
             // Process any further frames without blocking
             return self.process_available_frames();
@@ -545,7 +539,9 @@ impl Server {
 
         let core_ref = self.core.borrow();
 
-        return core_ref
+        return self
+            .core
+            .borrow()
             .timer_wheel
             .next_expiration_time_ms()
             .map(|expire_time_ms| time::Duration::from_millis(expire_time_ms - now_ms));
@@ -682,27 +678,19 @@ impl Server {
     }
 
     pub fn send(&mut self, peer_id: PeerId, packet_bytes: Box<[u8]>, mode: SendMode) {
-        let mut core_ref = self.core.borrow_mut();
-
-        send(
-            &mut *core_ref,
-            &mut self.peer_table,
-            peer_id,
-            packet_bytes,
-            mode,
-        );
+        self.core
+            .borrow_mut()
+            .send(&mut self.peer_table, peer_id, packet_bytes, mode);
     }
 
     pub fn flush(&mut self, peer_id: PeerId) {
-        let mut core_ref = self.core.borrow_mut();
-
-        flush(&mut *core_ref, &mut self.peer_table, peer_id);
+        self.core.borrow_mut().flush(&mut self.peer_table, peer_id);
     }
 
     pub fn disconnect(&mut self, peer_id: PeerId) {
-        let mut core_ref = self.core.borrow_mut();
-
-        disconnect(&mut *core_ref, &mut self.peer_table, peer_id);
+        self.core
+            .borrow_mut()
+            .disconnect(&mut self.peer_table, peer_id);
     }
 }
 
