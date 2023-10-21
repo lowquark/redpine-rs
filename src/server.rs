@@ -30,7 +30,7 @@ pub enum Event {
 
 struct PeerTimerData {
     peer_rc: PeerRc,
-    name: endpoint::TimerId,
+    timer_name: endpoint::TimerName,
 }
 
 type TimerWheel = timer_wheel::TimerWheel<PeerTimerData>;
@@ -186,10 +186,10 @@ impl PeerTimers {
         }
     }
 
-    fn get_mut(&mut self, id: endpoint::TimerId) -> &mut Option<timer_wheel::TimerId> {
-        match id {
-            endpoint::TimerId::Rto => &mut self.rto_timer_id,
-            endpoint::TimerId::Receive => &mut self.receive_timer_id,
+    fn get_mut(&mut self, name: endpoint::TimerName) -> &mut Option<timer_wheel::TimerId> {
+        match name {
+            endpoint::TimerName::Rto => &mut self.rto_timer_id,
+            endpoint::TimerName::Receive => &mut self.receive_timer_id,
         }
     }
 }
@@ -285,7 +285,7 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         let _ = self.server.socket.send_to(frame_bytes, &self.peer.addr);
     }
 
-    fn set_timer(&mut self, name: endpoint::TimerId, time_ms: u64) {
+    fn set_timer(&mut self, name: endpoint::TimerName, time_ms: u64) {
         let timer_id = self.peer.timers.get_mut(name);
 
         if let Some(id) = timer_id.take() {
@@ -296,12 +296,12 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
             time_ms,
             PeerTimerData {
                 peer_rc: Rc::clone(self.peer_rc),
-                name,
+                timer_name: name,
             },
         ))
     }
 
-    fn unset_timer(&mut self, name: endpoint::TimerId) {
+    fn unset_timer(&mut self, name: endpoint::TimerName) {
         let timer_id = self.peer.timers.get_mut(name);
 
         if let Some(id) = timer_id.take() {
@@ -373,7 +373,7 @@ fn handle_handshake_beta(server_rc: &ServerCoreRc, sender_addr: &net::SocketAddr
             now_ms + 500,
             PeerTimerData {
                 peer_rc,
-                name: endpoint::TimerId::Rto,
+                timer_name: endpoint::TimerName::Rto,
             },
         );
 
@@ -465,7 +465,7 @@ fn handle_frame(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net:
 fn handle_timer(
     server_rc: &ServerCoreRc,
     peer_rc: &PeerRc,
-    timer_id: endpoint::TimerId,
+    timer_name: endpoint::TimerName,
     now_ms: u64,
 ) {
     let mut server_ref = server_rc.borrow_mut();
@@ -480,7 +480,7 @@ fn handle_timer(
 
     let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
-    endpoint.handle_timer(timer_id, now_ms, host_ctx);
+    endpoint.handle_timer(timer_name, now_ms, host_ctx);
 
     while let Some(packet) = endpoint.pop_packet() {
         let handle = PeerHandle::new(Rc::clone(&peer_rc));
@@ -587,7 +587,7 @@ impl Server {
             .step_timer_wheel(&mut self.timer_data_expired);
 
         for timer_data in self.timer_data_expired.drain(..) {
-            handle_timer(&self.core, &timer_data.peer_rc, timer_data.name, now_ms);
+            handle_timer(&self.core, &timer_data.peer_rc, timer_data.timer_name, now_ms);
         }
     }
 

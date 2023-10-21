@@ -4,15 +4,15 @@ use super::frame;
 use super::SendMode;
 
 #[derive(Clone, Copy, Debug)]
-pub enum TimerId {
+pub enum TimerName {
     Rto,
     Receive,
 }
 
 pub trait HostContext {
     fn send(&mut self, frame_bytes: &[u8]);
-    fn set_timer(&mut self, timer: TimerId, time_ms: u64);
-    fn unset_timer(&mut self, timer: TimerId);
+    fn set_timer(&mut self, timer: TimerName, time_ms: u64);
+    fn unset_timer(&mut self, timer: TimerName);
 }
 
 struct FrameTxWindow {
@@ -342,7 +342,7 @@ impl Endpoint {
         }
     }
 
-    pub fn handle_timer<C>(&mut self, timer: TimerId, now_ms: u64, ctx: &mut C)
+    pub fn handle_timer<C>(&mut self, timer: TimerName, now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
@@ -531,11 +531,11 @@ mod tests {
             println!("send {:02X?}", frame_bytes);
         }
 
-        fn set_timer(&mut self, timer: TimerId, time_ms: u64) {
+        fn set_timer(&mut self, timer: TimerName, time_ms: u64) {
             println!("Set timer!");
         }
 
-        fn unset_timer(&mut self, timer: TimerId) {
+        fn unset_timer(&mut self, timer: TimerName) {
             println!("Unset timer!");
         }
     }

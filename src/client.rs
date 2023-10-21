@@ -77,23 +77,23 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
         let _ = self.socket.send(frame_bytes);
     }
 
-    fn set_timer(&mut self, timer: endpoint::TimerId, time_ms: u64) {
+    fn set_timer(&mut self, timer: endpoint::TimerName, time_ms: u64) {
         match timer {
-            endpoint::TimerId::Rto => {
+            endpoint::TimerName::Rto => {
                 self.timers.rto_timer.timeout_ms = Some(time_ms);
             }
-            endpoint::TimerId::Receive => {
+            endpoint::TimerName::Receive => {
                 self.timers.recv_timer.timeout_ms = Some(time_ms);
             }
         }
     }
 
-    fn unset_timer(&mut self, timer: endpoint::TimerId) {
+    fn unset_timer(&mut self, timer: endpoint::TimerName) {
         match timer {
-            endpoint::TimerId::Rto => {
+            endpoint::TimerName::Rto => {
                 self.timers.rto_timer.timeout_ms = None;
             }
-            endpoint::TimerId::Receive => {
+            endpoint::TimerName::Receive => {
                 self.timers.recv_timer.timeout_ms = None;
             }
         }
@@ -249,11 +249,11 @@ impl Client {
         return None;
     }
 
-    fn process_timeout(&mut self, timer_id: endpoint::TimerId, now_ms: u64) {
+    fn process_timeout(&mut self, timer_id: endpoint::TimerName, now_ms: u64) {
         match &mut self.state {
             State::Handshake(state) => {
                 match timer_id {
-                    endpoint::TimerId::Rto => {
+                    endpoint::TimerName::Rto => {
                         if now_ms >= state.timeout_time_ms {
                             // Connection failed
                             self.events.push_back(Event::Timeout);
@@ -273,7 +273,7 @@ impl Client {
                             }
                         }
                     }
-                    endpoint::TimerId::Receive => (),
+                    endpoint::TimerName::Receive => (),
                 }
             }
             State::Active(state) => {
@@ -300,12 +300,12 @@ impl Client {
     fn process_timeouts(&mut self) {
         let now_ms = self.time_now_ms();
 
-        let timer_ids = [endpoint::TimerId::Rto, endpoint::TimerId::Receive];
+        let timer_ids = [endpoint::TimerName::Rto, endpoint::TimerName::Receive];
 
         for timer_id in timer_ids {
             let timer = match timer_id {
-                endpoint::TimerId::Rto => &mut self.timers.rto_timer,
-                endpoint::TimerId::Receive => &mut self.timers.recv_timer,
+                endpoint::TimerName::Rto => &mut self.timers.rto_timer,
+                endpoint::TimerName::Receive => &mut self.timers.recv_timer,
             };
 
             if let Some(timeout_ms) = timer.timeout_ms {
