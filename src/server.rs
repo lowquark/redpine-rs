@@ -9,6 +9,16 @@ use super::endpoint;
 use super::timer_wheel;
 use super::SendMode;
 
+struct SocketReceiver {
+    // Reference to non-blocking, server socket
+    socket: Rc<net::UdpSocket>,
+    // Always-allocated receive buffer
+    recv_buffer: Box<[u8]>,
+    // Polling objects
+    poller: polling::Poller,
+    poller_events: polling::Events,
+}
+
 type PeerId = u32;
 
 pub enum Event {
@@ -31,69 +41,55 @@ struct PeerTimers {
 }
 
 struct PeerCore {
+    // Peer identifier, 0 is a valid identifier
     id: PeerId,
-
+    // Remote address
     addr: net::SocketAddr,
-
+    // Current timer states
     timers: PeerTimers,
 }
 
 struct Peer {
+    // Peer metadata
     core: PeerCore,
-
+    // Endpoint representing this peer's connection
     endpoint: endpoint::Endpoint,
 }
 
 struct PeerTable {
-    // Always-allocated ID-indexed list of peers
+    // Array of peers indexed by ID
     array: Vec<Option<Peer>>,
     // Mapping from sender address to peer ID
     addr_map: HashMap<net::SocketAddr, PeerId>,
 }
 
-struct ServerCore {
-    socket: Rc<net::UdpSocket>,
-
-    timer_wheel: TimerWheel,
-
-    events: VecDeque<Event>,
-
-    // Timestamps are computed relative to this instant
-    time_ref: time::Instant,
+struct HostContext<'a> {
+    server: &'a mut ServerCore,
+    peer: &'a mut PeerCore,
 }
 
-struct SocketReceiver {
-    // Reference to non-blocking, server socket
+struct ServerCore {
+    // Timestamps are computed relative to this instant
+    time_ref: time::Instant,
+    // Server socket
     socket: Rc<net::UdpSocket>,
-
-    // Always-allocated receive buffer
-    recv_buffer: Box<[u8]>,
-
-    // Polling objects
-    poller: polling::Poller,
-    poller_events: polling::Events,
+    // Pending timer events
+    timer_wheel: TimerWheel,
+    // Queue of pending events
+    events: VecDeque<Event>,
 }
 
 pub struct Server {
     // Interesting server data
     core: Rc<RefCell<ServerCore>>,
-
     // Table of connected peers
     peer_table: PeerTable,
-
     // Permits both blocking and non-blocking reads from a non-blocking socket
     receiver: SocketReceiver,
-
     // Always-allocated timer expiration buffer
     timer_data_expired: Vec<PeerTimerData>,
-
     // Cached from socket initialization
     local_addr: net::SocketAddr,
-}
-
-struct HostContext<'a> {
-    server: &'a mut ServerCore,
-    peer: &'a mut PeerCore,
 }
 
 const SOCKET_POLLING_KEY: usize = 0;
@@ -112,6 +108,64 @@ const TIMER_WHEEL_ARRAY_CONFIG: [timer_wheel::ArrayConfig; 3] = [
         ms_per_bin: 4 * 8 * 8,
     },
 ];
+
+impl SocketReceiver {
+    fn new(socket: Rc<net::UdpSocket>, frame_size_max: usize) -> std::io::Result<Self> {
+        let poller = polling::Poller::new()?;
+
+        unsafe {
+            poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
+        }
+
+        Ok(Self {
+            socket,
+            recv_buffer: vec![0; frame_size_max].into_boxed_slice(),
+            poller,
+            poller_events: polling::Events::new(),
+        })
+    }
+
+    /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
+    /// otherwise.
+    pub fn try_read_frame<'a>(
+        &'a mut self,
+    ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
+        match self.socket.recv_from(&mut self.recv_buffer) {
+            Ok((frame_len, sender_addr)) => {
+                let ref frame_bytes = self.recv_buffer[..frame_len];
+                Ok(Some((frame_bytes, sender_addr)))
+            }
+            Err(err) => match err.kind() {
+                // The only acceptable error is WouldBlock, indicating no packet
+                std::io::ErrorKind::WouldBlock => Ok(None),
+                _ => Err(err),
+            },
+        }
+    }
+
+    /// Blocks for a duration of up to `timeout` for an incoming frame and returns it. Returns
+    /// Ok(None) if no frame could be read in the alloted time, or if polling awoke spuriously.
+    pub fn wait_for_frame<'a>(
+        &'a mut self,
+        timeout: Option<time::Duration>,
+    ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
+        // Wait for a readable event (must be done prior to each wait() call)
+        // TODO: Does this work if the socket is already readable?
+        self.poller
+            .modify(&*self.socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
+
+        self.poller_events.clear();
+
+        let n = self.poller.wait(&mut self.poller_events, timeout)?;
+
+        if n > 0 {
+            // The socket is readable - read in confidence
+            self.try_read_frame()
+        } else {
+            Ok(None)
+        }
+    }
+}
 
 impl PeerTimers {
     fn new() -> Self {
@@ -200,6 +254,43 @@ impl PeerTable {
 
     pub fn count(&self) -> usize {
         self.addr_map.len()
+    }
+}
+
+impl<'a> HostContext<'a> {
+    fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore) -> Self {
+        Self { server, peer }
+    }
+}
+
+impl<'a> endpoint::HostContext for HostContext<'a> {
+    fn send(&mut self, frame_bytes: &[u8]) {
+        println!("sending frame to {:?}!", self.peer.addr);
+        let _ = self.server.socket.send_to(frame_bytes, &self.peer.addr);
+    }
+
+    fn set_timer(&mut self, name: endpoint::TimerId, time_ms: u64) {
+        let timer_id = self.peer.timers.get_mut(name);
+
+        if let Some(id) = timer_id.take() {
+            self.server.timer_wheel.unset_timer(id);
+        }
+
+        *timer_id = Some(self.server.timer_wheel.set_timer(
+            time_ms,
+            PeerTimerData {
+                peer_id: self.peer.id,
+                name,
+            },
+        ))
+    }
+
+    fn unset_timer(&mut self, name: endpoint::TimerId) {
+        let timer_id = self.peer.timers.get_mut(name);
+
+        if let Some(id) = timer_id.take() {
+            self.server.timer_wheel.unset_timer(id);
+        }
     }
 }
 
@@ -447,64 +538,6 @@ impl ServerCore {
     }
 }
 
-impl SocketReceiver {
-    fn new(socket: Rc<net::UdpSocket>, frame_size_max: usize) -> std::io::Result<Self> {
-        let poller = polling::Poller::new()?;
-
-        unsafe {
-            poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
-        }
-
-        Ok(Self {
-            socket,
-            recv_buffer: vec![0; frame_size_max].into_boxed_slice(),
-            poller,
-            poller_events: polling::Events::new(),
-        })
-    }
-
-    /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
-    /// otherwise.
-    pub fn try_read_frame<'a>(
-        &'a mut self,
-    ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
-        match self.socket.recv_from(&mut self.recv_buffer) {
-            Ok((frame_len, sender_addr)) => {
-                let ref frame_bytes = self.recv_buffer[..frame_len];
-                Ok(Some((frame_bytes, sender_addr)))
-            }
-            Err(err) => match err.kind() {
-                // The only acceptable error is WouldBlock, indicating no packet
-                std::io::ErrorKind::WouldBlock => Ok(None),
-                _ => Err(err),
-            },
-        }
-    }
-
-    /// Blocks for a duration of up to `timeout` for an incoming frame and returns it. Returns
-    /// Ok(None) if no frame could be read in the alloted time, or if polling awoke spuriously.
-    pub fn wait_for_frame<'a>(
-        &'a mut self,
-        timeout: Option<time::Duration>,
-    ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
-        // Wait for a readable event (must be done prior to each wait() call)
-        // TODO: Does this work if the socket is already readable?
-        self.poller
-            .modify(&*self.socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
-
-        self.poller_events.clear();
-
-        let n = self.poller.wait(&mut self.poller_events, timeout)?;
-
-        if n > 0 {
-            // The socket is readable - read in confidence
-            self.try_read_frame()
-        } else {
-            Ok(None)
-        }
-    }
-}
-
 impl Server {
     pub fn bind<A>(bind_addr: A) -> std::io::Result<Self>
     where
@@ -527,10 +560,10 @@ impl Server {
 
         Ok(Self {
             core: Rc::new(RefCell::new(ServerCore {
+                time_ref: time::Instant::now(),
                 socket: socket_rc,
                 timer_wheel: TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
                 events: VecDeque::new(),
-                time_ref: time::Instant::now(),
             })),
             peer_table: PeerTable::new(peer_count_max),
             receiver,
@@ -672,42 +705,5 @@ impl Server {
 
     pub fn peer_count(&self) -> usize {
         self.peer_table.count().into()
-    }
-}
-
-impl<'a> HostContext<'a> {
-    fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore) -> Self {
-        Self { server, peer }
-    }
-}
-
-impl<'a> endpoint::HostContext for HostContext<'a> {
-    fn send(&mut self, frame_bytes: &[u8]) {
-        println!("sending frame to {:?}!", self.peer.addr);
-        let _ = self.server.socket.send_to(frame_bytes, &self.peer.addr);
-    }
-
-    fn set_timer(&mut self, name: endpoint::TimerId, time_ms: u64) {
-        let timer_id = self.peer.timers.get_mut(name);
-
-        if let Some(id) = timer_id.take() {
-            self.server.timer_wheel.unset_timer(id);
-        }
-
-        *timer_id = Some(self.server.timer_wheel.set_timer(
-            time_ms,
-            PeerTimerData {
-                peer_id: self.peer.id,
-                name,
-            },
-        ))
-    }
-
-    fn unset_timer(&mut self, name: endpoint::TimerId) {
-        let timer_id = self.peer.timers.get_mut(name);
-
-        if let Some(id) = timer_id.take() {
-            self.server.timer_wheel.unset_timer(id);
-        }
     }
 }
