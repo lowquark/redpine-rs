@@ -413,6 +413,33 @@ impl ServerCore {
         }
     }
 
+    /// Reads and processes as many frames as possible without blocking.
+    pub fn process_available_frames(
+        &mut self,
+        receiver: &mut SocketReceiver,
+        peer_table: &mut PeerTable,
+    ) {
+        while let Ok(Some((frame_bytes, sender_addr))) = receiver.try_read_frame() {
+            // Process this frame
+            self.process_frame(peer_table, frame_bytes, &sender_addr);
+        }
+    }
+
+    /// Reads and processes as many frames as possible, waiting up to `wait_timeout` for the first.
+    pub fn process_available_frames_wait(
+        &mut self,
+        receiver: &mut SocketReceiver,
+        peer_table: &mut PeerTable,
+        wait_timeout: Option<time::Duration>,
+    ) {
+        if let Ok(Some((frame_bytes, sender_addr))) = receiver.wait_for_frame(wait_timeout) {
+            // Process this frame
+            self.process_frame(peer_table, frame_bytes, &sender_addr);
+            // Process any further frames without blocking
+            return self.process_available_frames(receiver, peer_table);
+        }
+    }
+
     fn process_timeout(
         &mut self,
         peer_table: &mut PeerTable,
@@ -441,7 +468,8 @@ impl ServerCore {
         }
     }
 
-    fn process_timeouts(
+    /// Processes all pending timer events.
+    pub fn process_timeouts(
         &mut self,
         peer_table: &mut PeerTable,
         timer_data_expired: &mut Vec<PeerTimerData>,
@@ -460,8 +488,8 @@ impl ServerCore {
         }
     }
 
-    /// Returns the time remaining until the next timer expires.
-    fn next_timer_timeout(&self) -> Option<time::Duration> {
+    /// Returns a duration representing the time until the next timer event, if one exists.
+    pub fn next_timer_timeout(&self) -> Option<time::Duration> {
         // WLOG, assume the time reference is zero. All units are ms, and `_ms` denotes an integer
         // timestamp as is convention in the code.
         //
@@ -484,7 +512,7 @@ impl ServerCore {
             .map(|expire_time_ms| time::Duration::from_millis(expire_time_ms - now_ms));
     }
 
-    fn send(
+    pub fn send(
         &mut self,
         peer_table: &mut PeerTable,
         peer_id: PeerId,
@@ -497,7 +525,7 @@ impl ServerCore {
         }
     }
 
-    fn flush(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
+    pub fn flush(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
         if let Some(peer) = peer_table.get_mut(peer_id) {
             let peer_id = peer.core.id;
 
@@ -519,7 +547,7 @@ impl ServerCore {
         }
     }
 
-    fn disconnect(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
+    pub fn disconnect(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
         if let Some(peer) = peer_table.get_mut(peer_id) {
             let peer_id = peer.core.id;
 
@@ -531,7 +559,7 @@ impl ServerCore {
         }
     }
 
-    fn drop(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
+    pub fn drop(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
         if let Some(peer) = peer_table.get_mut(peer_id) {
             peer_table.remove(peer_id);
         }
@@ -572,68 +600,40 @@ impl Server {
         })
     }
 
-    /// Reads and processes as many frames as possible from the socket without blocking.
-    fn process_available_frames(&mut self) {
-        while let Ok(Some((frame_bytes, sender_addr))) = self.receiver.try_read_frame() {
-            // Process this frame
-            self.core
-                .borrow_mut()
-                .process_frame(&mut self.peer_table, frame_bytes, &sender_addr);
-        }
-    }
-
-    /// Reads and processes as many frames as possible from the socket, waiting up to
-    /// `wait_timeout` for the first.
-    fn process_available_frames_wait(&mut self, wait_timeout: Option<time::Duration>) {
-        if let Ok(Some((frame_bytes, sender_addr))) = self.receiver.wait_for_frame(wait_timeout) {
-            // Process this frame
-            self.core
-                .borrow_mut()
-                .process_frame(&mut self.peer_table, frame_bytes, &sender_addr);
-
-            // Process any further frames without blocking
-            return self.process_available_frames();
-        }
-    }
-
-    /// Processes all pending timer events.
-    fn process_timeouts(&mut self) {
-        self.core
-            .borrow_mut()
-            .process_timeouts(&mut self.peer_table, &mut self.timer_data_expired);
-    }
-
-    /// Returns a duration representing the time until the next timer event, if one exists.
-    fn next_timer_timeout(&self) -> Option<time::Duration> {
-        self.core.borrow().next_timer_timeout()
-    }
-
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts in an attempt to produce an event.
     ///
     /// Returns `None` if no events are available, or if an error was encountered while reading
     /// from the internal socket.
     pub fn poll_event(&mut self) -> Option<Event> {
-        if self.core.borrow().events.is_empty() {
-            self.process_available_frames();
+        let mut core_ref = self.core.borrow_mut();
 
-            self.process_timeouts();
+        if core_ref.events.is_empty() {
+            core_ref.process_available_frames(&mut self.receiver, &mut self.peer_table);
+
+            core_ref.process_timeouts(&mut self.peer_table, &mut self.timer_data_expired);
         }
 
-        return self.core.borrow_mut().events.pop_front();
+        return core_ref.events.pop_front();
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned.
     pub fn wait_event(&mut self) -> Event {
+        let mut core_ref = self.core.borrow_mut();
+
         loop {
-            let wait_timeout = self.next_timer_timeout();
+            let wait_timeout = core_ref.next_timer_timeout();
 
-            self.process_available_frames_wait(wait_timeout);
+            core_ref.process_available_frames_wait(
+                &mut self.receiver,
+                &mut self.peer_table,
+                wait_timeout,
+            );
 
-            self.process_timeouts();
+            core_ref.process_timeouts(&mut self.peer_table, &mut self.timer_data_expired);
 
-            if let Some(event) = self.core.borrow_mut().events.pop_front() {
+            if let Some(event) = core_ref.events.pop_front() {
                 return event;
             }
         }
@@ -645,22 +645,26 @@ impl Server {
     ///
     /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
-        if self.core.borrow().events.is_empty() {
+        let mut core_ref = self.core.borrow_mut();
+
+        if core_ref.events.is_empty() {
             let mut remaining_timeout = timeout;
             let mut wait_begin = time::Instant::now();
 
             loop {
-                let wait_timeout = if let Some(timer_timeout) = self.next_timer_timeout() {
+                let wait_timeout = if let Some(timer_timeout) = core_ref.next_timer_timeout() {
                     remaining_timeout.min(timer_timeout)
                 } else {
                     remaining_timeout
                 };
 
-                self.process_available_frames_wait(Some(wait_timeout));
+                core_ref.process_available_frames_wait(
+                    &mut self.receiver,
+                    &mut self.peer_table,
+                    Some(wait_timeout),
+                );
 
-                self.process_timeouts();
-
-                let mut core_ref = self.core.borrow_mut();
+                core_ref.process_timeouts(&mut self.peer_table, &mut self.timer_data_expired);
 
                 if !core_ref.events.is_empty() {
                     // Found what we're looking for
@@ -680,23 +684,25 @@ impl Server {
             }
         }
 
-        return self.core.borrow_mut().events.pop_front();
+        return core_ref.events.pop_front();
     }
 
     pub fn send(&mut self, peer_id: PeerId, packet_bytes: Box<[u8]>, mode: SendMode) {
-        self.core
-            .borrow_mut()
-            .send(&mut self.peer_table, peer_id, packet_bytes, mode);
+        let mut core_ref = self.core.borrow_mut();
+
+        core_ref.send(&mut self.peer_table, peer_id, packet_bytes, mode);
     }
 
     pub fn flush(&mut self, peer_id: PeerId) {
-        self.core.borrow_mut().flush(&mut self.peer_table, peer_id);
+        let mut core_ref = self.core.borrow_mut();
+
+        core_ref.flush(&mut self.peer_table, peer_id);
     }
 
     pub fn disconnect(&mut self, peer_id: PeerId) {
-        self.core
-            .borrow_mut()
-            .disconnect(&mut self.peer_table, peer_id);
+        let mut core_ref = self.core.borrow_mut();
+
+        core_ref.disconnect(&mut self.peer_table, peer_id);
     }
 
     pub fn local_addr(&self) -> net::SocketAddr {
