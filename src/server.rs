@@ -238,10 +238,7 @@ impl ServerCore {
             let peer_id = peer.core.id;
             let ref mut endpoint = peer.endpoint;
 
-            let ref mut host_ctx = HostContext {
-                server: &mut self.core,
-                peer: &mut peer.core,
-            };
+            let ref mut host_ctx = HostContext::new(&mut self.core, &mut peer.core);
 
             endpoint.handle_frame(frame_bytes, host_ctx);
 
@@ -303,10 +300,7 @@ impl ServerCore {
 
             let ref mut endpoint = peer.endpoint;
 
-            let ref mut host_ctx = HostContext {
-                server: &mut self.core,
-                peer: &mut peer.core,
-            };
+            let ref mut host_ctx = HostContext::new(&mut self.core, &mut peer.core);
 
             endpoint.handle_timer(timer_name, now_ms, host_ctx);
 
@@ -335,10 +329,7 @@ impl ServerCore {
 
             let ref mut endpoint = peer.endpoint;
 
-            let ref mut host_ctx = HostContext {
-                server: &mut self.core,
-                peer: &mut peer.core,
-            };
+            let ref mut host_ctx = HostContext::new(&mut self.core, &mut peer.core);
 
             endpoint.flush(host_ctx);
 
@@ -360,10 +351,7 @@ impl ServerCore {
 
             let ref mut endpoint = peer.endpoint;
 
-            let ref mut host_ctx = HostContext {
-                server: &mut self.core,
-                peer: &mut peer.core,
-            };
+            let ref mut host_ctx = HostContext::new(&mut self.core, &mut peer.core);
 
             endpoint.disconnect();
         }
@@ -621,6 +609,12 @@ impl Server {
 
     pub fn disconnect(&mut self, peer_id: PeerId) {
         self.core.flush(peer_id);
+    }
+}
+
+impl<'a> HostContext<'a> {
+    fn new(server: &'a mut ServerCoreCore, peer: &'a mut PeerCore) -> Self {
+        Self { server, peer }
     }
 }
 
