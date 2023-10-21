@@ -57,6 +57,9 @@ struct ServerCore {
     timer_wheel: TimerWheel,
 
     events: VecDeque<Event>,
+
+    // Timestamps are computed relative to this instant
+    time_ref: time::Instant,
 }
 
 struct SocketReceiver {
@@ -80,9 +83,6 @@ pub struct Server {
 
     // Permits both blocking and non-blocking reads from a non-blocking socket
     receiver: SocketReceiver,
-
-    // Timestamps are computed relative to this instant
-    time_ref: time::Instant,
 
     // Always-allocated timer expiration buffer
     timer_data_expired: Vec<PeerTimerData>,
@@ -204,6 +204,11 @@ impl PeerTable {
 }
 
 impl ServerCore {
+    /// Returns the number of whole milliseconds elapsed since the server object was created.
+    fn time_now_ms(&self) -> u64 {
+        (time::Instant::now() - self.time_ref).as_millis() as u64
+    }
+
     fn process_handshake_alpha(
         &mut self,
         peer_table: &mut PeerTable,
@@ -275,8 +280,9 @@ impl ServerCore {
         peer_table: &mut PeerTable,
         frame_bytes: &[u8],
         sender_addr: &net::SocketAddr,
-        now_ms: u64,
     ) {
+        let now_ms = self.time_now_ms();
+
         println!(
             "received a packet of length {} from {:?}",
             frame_bytes.len(),
@@ -342,6 +348,49 @@ impl ServerCore {
                 peer_table.remove(peer_id);
             }
         }
+    }
+
+    fn process_timeouts(
+        &mut self,
+        peer_table: &mut PeerTable,
+        timer_data_expired: &mut Vec<PeerTimerData>,
+    ) {
+        let now_ms = self.time_now_ms();
+
+        self.timer_wheel.step(now_ms, timer_data_expired);
+
+        for timer_data in timer_data_expired.drain(..) {
+            println!("Timer expired!");
+
+            let peer_id = timer_data.peer_id;
+            let timer_name = timer_data.name;
+
+            self.process_timeout(peer_table, peer_id, timer_name, now_ms);
+        }
+    }
+
+    /// Returns the time remaining until the next timer expires.
+    fn next_timer_timeout(&self) -> Option<time::Duration> {
+        // WLOG, assume the time reference is zero. All units are ms, and `_ms` denotes an integer
+        // timestamp as is convention in the code.
+        //
+        //   1: t_now_ms = floor(t_now) ≤ t_now
+        //   1: t_now - t_now_ms ≥ 0
+        //   2: t_wake ≥ t_now + (t_expire_ms - t_now_ms)
+        //   2: t_wake ≥ (t_now - t_now_ms) + t_expire_ms
+        // 2∘1: t_wake ≥ t_expire_ms
+        // 2∘1: floor(t_wake) ≥ floor(t_expire_ms) = t_expire_ms
+        // 2∘1: t_wake_ms ≥ t_expire_ms
+        //
+        // Since t_wake will round to a minimum of t_expire_ms, we will not skip a timer by waking
+        // too soon.
+
+        let now_ms = self.time_now_ms();
+
+        return self
+            .timer_wheel
+            .next_expiration_time_ms()
+            .map(|expire_time_ms| time::Duration::from_millis(expire_time_ms - now_ms));
     }
 
     fn send(
@@ -457,96 +506,6 @@ impl SocketReceiver {
 }
 
 impl Server {
-    /// Returns the number of whole milliseconds elapsed since the server object was created.
-    fn time_now_ms(&self) -> u64 {
-        (time::Instant::now() - self.time_ref).as_millis() as u64
-    }
-
-    fn process_timeouts(&mut self) {
-        let now_ms = self.time_now_ms();
-
-        self.core
-            .borrow_mut()
-            .timer_wheel
-            .step(now_ms, &mut self.timer_data_expired);
-
-        for timer_data in self.timer_data_expired.drain(..) {
-            println!("Timer expired!");
-
-            let peer_id = timer_data.peer_id;
-            let timer_name = timer_data.name;
-
-            self.core.borrow_mut().process_timeout(
-                &mut self.peer_table,
-                peer_id,
-                timer_name,
-                now_ms,
-            );
-        }
-    }
-
-    /// Reads and processes as many frames as possible from the socket without blocking.
-    fn process_available_frames(&mut self) {
-        while let Ok(Some((frame_bytes, sender_addr))) = self.receiver.try_read_frame() {
-            // Process this frame
-            let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
-
-            self.core.borrow_mut().process_frame(
-                &mut self.peer_table,
-                frame_bytes,
-                &sender_addr,
-                now_ms,
-            );
-        }
-    }
-
-    /// Reads and processes as many frames as possible from the socket, waiting up to
-    /// `wait_timeout` for the first.
-    fn process_available_frames_wait(&mut self, wait_timeout: Option<time::Duration>) {
-        if let Ok(Some((frame_bytes, sender_addr))) = self.receiver.wait_for_frame(wait_timeout) {
-            // Process this frame
-            let now_ms = (time::Instant::now() - self.time_ref).as_millis() as u64;
-
-            self.core.borrow_mut().process_frame(
-                &mut self.peer_table,
-                frame_bytes,
-                &sender_addr,
-                now_ms,
-            );
-
-            // Process any further frames without blocking
-            return self.process_available_frames();
-        }
-    }
-
-    /// Returns the time remaining until the next timer expires.
-    fn next_timer_timeout(&self) -> Option<time::Duration> {
-        // WLOG, assume the time reference is zero. All units are ms, and `_ms` denotes an integer
-        // timestamp as is convention in the code.
-        //
-        //   1: t_now_ms = floor(t_now) ≤ t_now
-        //   1: t_now - t_now_ms ≥ 0
-        //   2: t_wake ≥ t_now + (t_expire_ms - t_now_ms)
-        //   2: t_wake ≥ (t_now - t_now_ms) + t_expire_ms
-        // 2∘1: t_wake ≥ t_expire_ms
-        // 2∘1: floor(t_wake) ≥ floor(t_expire_ms) = t_expire_ms
-        // 2∘1: t_wake_ms ≥ t_expire_ms
-        //
-        // Since t_wake will round to a minimum of t_expire_ms, we will not skip a timer by waking
-        // too soon.
-
-        let now_ms = self.time_now_ms();
-
-        let core_ref = self.core.borrow();
-
-        return self
-            .core
-            .borrow()
-            .timer_wheel
-            .next_expiration_time_ms()
-            .map(|expire_time_ms| time::Duration::from_millis(expire_time_ms - now_ms));
-    }
-
     pub fn bind<A>(bind_addr: A) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
@@ -571,13 +530,49 @@ impl Server {
                 socket: socket_rc,
                 timer_wheel: TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
                 events: VecDeque::new(),
+                time_ref: time::Instant::now(),
             })),
             peer_table: PeerTable::new(peer_count_max),
             receiver,
-            time_ref: time::Instant::now(),
             timer_data_expired: Vec::new(),
             local_addr,
         })
+    }
+
+    /// Reads and processes as many frames as possible from the socket without blocking.
+    fn process_available_frames(&mut self) {
+        while let Ok(Some((frame_bytes, sender_addr))) = self.receiver.try_read_frame() {
+            // Process this frame
+            self.core
+                .borrow_mut()
+                .process_frame(&mut self.peer_table, frame_bytes, &sender_addr);
+        }
+    }
+
+    /// Reads and processes as many frames as possible from the socket, waiting up to
+    /// `wait_timeout` for the first.
+    fn process_available_frames_wait(&mut self, wait_timeout: Option<time::Duration>) {
+        if let Ok(Some((frame_bytes, sender_addr))) = self.receiver.wait_for_frame(wait_timeout) {
+            // Process this frame
+            self.core
+                .borrow_mut()
+                .process_frame(&mut self.peer_table, frame_bytes, &sender_addr);
+
+            // Process any further frames without blocking
+            return self.process_available_frames();
+        }
+    }
+
+    /// Processes all pending timer events.
+    fn process_timeouts(&mut self) {
+        self.core
+            .borrow_mut()
+            .process_timeouts(&mut self.peer_table, &mut self.timer_data_expired);
+    }
+
+    /// Returns a duration representing the time until the next timer event, if one exists.
+    fn next_timer_timeout(&self) -> Option<time::Duration> {
+        self.core.borrow().next_timer_timeout()
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
@@ -586,19 +581,13 @@ impl Server {
     /// Returns `None` if no events are available, or if an error was encountered while reading
     /// from the internal socket.
     pub fn poll_event(&mut self) -> Option<Event> {
-        let core_ref = self.core.borrow();
-
-        if core_ref.events.is_empty() {
-            std::mem::drop(core_ref);
-
+        if self.core.borrow().events.is_empty() {
             self.process_available_frames();
 
             self.process_timeouts();
         }
 
-        let mut core_ref = self.core.borrow_mut();
-
-        return core_ref.events.pop_front();
+        return self.core.borrow_mut().events.pop_front();
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
@@ -611,9 +600,7 @@ impl Server {
 
             self.process_timeouts();
 
-            let mut core_ref = self.core.borrow_mut();
-
-            if let Some(event) = core_ref.events.pop_front() {
+            if let Some(event) = self.core.borrow_mut().events.pop_front() {
                 return event;
             }
         }
@@ -625,11 +612,7 @@ impl Server {
     ///
     /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
-        let core_ref = self.core.borrow();
-
-        if core_ref.events.is_empty() {
-            std::mem::drop(core_ref);
-
+        if self.core.borrow().events.is_empty() {
             let mut remaining_timeout = timeout;
             let mut wait_begin = time::Instant::now();
 
@@ -664,17 +647,7 @@ impl Server {
             }
         }
 
-        let mut core_ref = self.core.borrow_mut();
-
-        return core_ref.events.pop_front();
-    }
-
-    pub fn local_addr(&self) -> net::SocketAddr {
-        self.local_addr
-    }
-
-    pub fn peer_count(&self) -> usize {
-        self.peer_table.count().into()
+        return self.core.borrow_mut().events.pop_front();
     }
 
     pub fn send(&mut self, peer_id: PeerId, packet_bytes: Box<[u8]>, mode: SendMode) {
@@ -691,6 +664,14 @@ impl Server {
         self.core
             .borrow_mut()
             .disconnect(&mut self.peer_table, peer_id);
+    }
+
+    pub fn local_addr(&self) -> net::SocketAddr {
+        self.local_addr
+    }
+
+    pub fn peer_count(&self) -> usize {
+        self.peer_table.count().into()
     }
 }
 
