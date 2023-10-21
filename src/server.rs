@@ -55,7 +55,7 @@ struct Peer {
     // Endpoint representing this peer's connection
     endpoint: endpoint::Endpoint,
     // Permits server operations from a peer handle
-    server: Rc<RefCell<ServerCore>>,
+    server: ServerCoreRc,
 }
 
 type PeerRc = Rc<RefCell<Peer>>;
@@ -83,9 +83,11 @@ struct ServerCore {
     events: VecDeque<Event>,
 }
 
+type ServerCoreRc = Rc<RefCell<ServerCore>>;
+
 pub struct Server {
     // Interesting server data
-    core: Rc<RefCell<ServerCore>>,
+    core: ServerCoreRc,
     // Table of connected peers
     peer_table: PeerTable,
     // Permits both blocking and non-blocking reads from a non-blocking socket
@@ -192,7 +194,7 @@ impl PeerTimers {
 }
 
 impl Peer {
-    fn new(id: PeerId, addr: net::SocketAddr, server: Rc<RefCell<ServerCore>>) -> Self {
+    fn new(id: PeerId, addr: net::SocketAddr, server: ServerCoreRc) -> Self {
         Self {
             core: PeerCore {
                 id,
@@ -239,7 +241,11 @@ impl PeerTable {
         }
     }
 
-    pub fn insert(&mut self, addr: &net::SocketAddr, server_rc: Rc<RefCell<ServerCore>>) -> Option<(PeerId, PeerRc)> {
+    pub fn insert(
+        &mut self,
+        addr: &net::SocketAddr,
+        server_rc: ServerCoreRc,
+    ) -> Option<(PeerId, PeerRc)> {
         if self.addr_map.len() < self.array.len() && !self.addr_map.contains_key(addr) {
             let id = self.find_free_id();
             let peer_rc = Rc::new(RefCell::new(Peer::new(id, addr.clone(), server_rc)));
@@ -323,7 +329,7 @@ impl ServerCore {
         peer_table: &mut PeerTable,
         sender_addr: &net::SocketAddr,
         now_ms: u64,
-        server_rc: &Rc<RefCell<ServerCore>>,
+        server_rc: &ServerCoreRc,
     ) {
         if let Some((new_peer_id, peer_rc)) = peer_table.insert(sender_addr, Rc::clone(server_rc)) {
             // Notify user of inbound connection
@@ -389,7 +395,7 @@ impl ServerCore {
         peer_table: &mut PeerTable,
         frame_bytes: &[u8],
         sender_addr: &net::SocketAddr,
-        server_rc: &Rc<RefCell<ServerCore>>,
+        server_rc: &ServerCoreRc,
     ) {
         let now_ms = self.time_now_ms();
 
@@ -437,7 +443,7 @@ impl ServerCore {
         &mut self,
         receiver: &mut SocketReceiver,
         peer_table: &mut PeerTable,
-        server_rc: &Rc<RefCell<ServerCore>>,
+        server_rc: &ServerCoreRc,
     ) {
         while let Ok(Some((frame_bytes, sender_addr))) = receiver.try_read_frame() {
             // Process this frame
@@ -451,7 +457,7 @@ impl ServerCore {
         receiver: &mut SocketReceiver,
         peer_table: &mut PeerTable,
         wait_timeout: Option<time::Duration>,
-        server_rc: &Rc<RefCell<ServerCore>>,
+        server_rc: &ServerCoreRc,
     ) {
         if let Ok(Some((frame_bytes, sender_addr))) = receiver.wait_for_frame(wait_timeout) {
             // Process this frame
@@ -711,5 +717,9 @@ impl PeerHandle {
 
         // ???
         // peer_ref.endpoint.disconnect();
+    }
+
+    pub fn id(&self) -> PeerId {
+        self.peer.borrow().core.id
     }
 }
