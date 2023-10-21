@@ -503,7 +503,11 @@ impl Endpoint {
         self.actual_flush(false, false, true, ctx);
     }
 
-    pub fn disconnect(&mut self) {}
+    pub fn disconnect<C>(&mut self, ctx: &mut C)
+    where
+        C: HostContext,
+    {
+    }
 
     pub fn is_closed(&self) -> bool {
         false
