@@ -63,7 +63,7 @@ struct PeerTable {
     addr_map: HashMap<net::SocketAddr, PeerId>,
 }
 
-struct HostContext<'a> {
+struct EndpointContext<'a> {
     server: &'a mut ServerCore,
     peer: &'a mut PeerCore,
 }
@@ -257,13 +257,13 @@ impl PeerTable {
     }
 }
 
-impl<'a> HostContext<'a> {
+impl<'a> EndpointContext<'a> {
     fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore) -> Self {
         Self { server, peer }
     }
 }
 
-impl<'a> endpoint::HostContext for HostContext<'a> {
+impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn send(&mut self, frame_bytes: &[u8]) {
         println!("sending frame to {:?}!", self.peer.addr);
         let _ = self.server.socket.send_to(frame_bytes, &self.peer.addr);
@@ -350,7 +350,7 @@ impl ServerCore {
             let peer_id = peer.core.id;
             let ref mut endpoint = peer.endpoint;
 
-            let ref mut host_ctx = HostContext::new(self, &mut peer.core);
+            let ref mut host_ctx = EndpointContext::new(self, &mut peer.core);
 
             endpoint.handle_frame(frame_bytes, host_ctx);
 
@@ -452,7 +452,7 @@ impl ServerCore {
 
             let ref mut endpoint = peer.endpoint;
 
-            let ref mut host_ctx = HostContext::new(self, &mut peer.core);
+            let ref mut host_ctx = EndpointContext::new(self, &mut peer.core);
 
             endpoint.handle_timer(timer_name, now_ms, host_ctx);
 
@@ -531,7 +531,7 @@ impl ServerCore {
 
             let ref mut endpoint = peer.endpoint;
 
-            let ref mut host_ctx = HostContext::new(self, &mut peer.core);
+            let ref mut host_ctx = EndpointContext::new(self, &mut peer.core);
 
             endpoint.flush(host_ctx);
 
@@ -553,7 +553,7 @@ impl ServerCore {
 
             let ref mut endpoint = peer.endpoint;
 
-            let ref mut host_ctx = HostContext::new(self, &mut peer.core);
+            let ref mut host_ctx = EndpointContext::new(self, &mut peer.core);
 
             endpoint.disconnect();
         }
