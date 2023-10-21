@@ -29,7 +29,7 @@ pub enum Event {
 }
 
 struct PeerTimerData {
-    peer_id: PeerId,
+    peer_rc: PeerRc,
     name: endpoint::TimerId,
 }
 
@@ -70,6 +70,7 @@ struct PeerTable {
 struct EndpointContext<'a> {
     server: &'a mut ServerCore,
     peer: &'a mut PeerCore,
+    peer_rc: &'a PeerRc,
 }
 
 struct ServerCore {
@@ -273,8 +274,8 @@ impl PeerTable {
 }
 
 impl<'a> EndpointContext<'a> {
-    fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore) -> Self {
-        Self { server, peer }
+    fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore, peer_rc: &'a PeerRc) -> Self {
+        Self { server, peer, peer_rc }
     }
 }
 
@@ -294,7 +295,7 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         *timer_id = Some(self.server.timer_wheel.set_timer(
             time_ms,
             PeerTimerData {
-                peer_id: self.peer.id,
+                peer_rc: Rc::clone(self.peer_rc),
                 name,
             },
         ))
@@ -364,14 +365,14 @@ fn handle_handshake_beta(server_rc: &ServerCoreRc, sender_addr: &net::SocketAddr
         .insert(sender_addr, Rc::clone(server_rc))
     {
         // Notify user of inbound connection
-        let handle = PeerHandle::new(peer_rc);
+        let handle = PeerHandle::new(Rc::clone(&peer_rc));
         server_ref.events.push_back(Event::Connect(handle));
 
         // Set a dummy timer just for fun
         server_ref.timer_wheel.set_timer(
             now_ms + 500,
             PeerTimerData {
-                peer_id: new_peer_id,
+                peer_rc,
                 name: endpoint::TimerId::Rto,
             },
         );
@@ -387,7 +388,7 @@ fn handle_handshake_beta(server_rc: &ServerCoreRc, sender_addr: &net::SocketAddr
     let _ = server_ref.socket.send_to(&[0xB1], sender_addr);
 }
 
-fn handle_frame_peer(server_rc: &ServerCoreRc, peer_rc: &PeerRc, frame_bytes: &[u8]) {
+fn handle_connected_frame(server_rc: &ServerCoreRc, peer_rc: &PeerRc, frame_bytes: &[u8]) {
     let mut server_ref = server_rc.borrow_mut();
     let ref mut server = *server_ref;
 
@@ -396,7 +397,7 @@ fn handle_frame_peer(server_rc: &ServerCoreRc, peer_rc: &PeerRc, frame_bytes: &[
 
     let ref mut endpoint = peer.endpoint;
 
-    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core);
+    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
     endpoint.handle_frame(frame_bytes, host_ctx);
 
@@ -452,7 +453,7 @@ fn handle_frame(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net:
 
                     std::mem::drop(server_ref);
 
-                    handle_frame_peer(server_rc, &peer_rc, frame_bytes);
+                    handle_connected_frame(server_rc, &peer_rc, frame_bytes);
                 }
             }
         }
@@ -477,7 +478,7 @@ fn handle_timer(
 
     let ref mut endpoint = peer.endpoint;
 
-    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core);
+    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
     endpoint.handle_timer(timer_id, now_ms, host_ctx);
 
@@ -516,7 +517,7 @@ fn handle_flush(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
 
     let ref mut endpoint = peer.endpoint;
 
-    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core);
+    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
     endpoint.flush(host_ctx);
 
@@ -542,7 +543,7 @@ fn handle_disconnect(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
 
     let ref mut endpoint = peer.endpoint;
 
-    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core);
+    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
     endpoint.disconnect(host_ctx);
 
@@ -586,15 +587,7 @@ impl Server {
             .step_timer_wheel(&mut self.timer_data_expired);
 
         for timer_data in self.timer_data_expired.drain(..) {
-            let mut core_ref = self.core.borrow_mut();
-
-            if let Some(peer_rc) = core_ref.peer_table.get_mut(timer_data.peer_id) {
-                let peer_rc = Rc::clone(&peer_rc);
-
-                std::mem::drop(core_ref);
-
-                handle_timer(&self.core, &peer_rc, timer_data.name, now_ms);
-            }
+            handle_timer(&self.core, &timer_data.peer_rc, timer_data.name, now_ms);
         }
     }
 
