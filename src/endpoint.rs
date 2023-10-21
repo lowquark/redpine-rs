@@ -503,6 +503,8 @@ impl Endpoint {
         self.actual_flush(false, false, true, ctx);
     }
 
+    pub fn disconnect(&mut self) {}
+
     pub fn is_closed(&self) -> bool {
         false
     }

@@ -90,11 +90,6 @@ struct HostContext<'a> {
     peer: &'a mut PeerCore,
 }
 
-pub struct PeerHandle<'a> {
-    server: &'a mut ServerCoreCore,
-    peer: &'a mut Peer,
-}
-
 const SOCKET_POLLING_KEY: usize = 0;
 
 const TIMER_WHEEL_ARRAY_CONFIG: [timer_wheel::ArrayConfig; 3] = [
@@ -324,6 +319,59 @@ impl ServerCore {
 
                 self.peer_table.remove(peer_id);
             }
+        }
+    }
+
+    fn send(&mut self, peer_id: PeerId, packet_bytes: Box<[u8]>, mode: SendMode) {
+        if let Some(peer) = self.peer_table.get_mut(peer_id) {
+            println!("sending packet to {:?}!", peer.core.addr);
+            let _ = peer.endpoint.enqueue_packet(packet_bytes, mode);
+        }
+    }
+
+    fn flush(&mut self, peer_id: PeerId) {
+        if let Some(peer) = self.peer_table.get_mut(peer_id) {
+            let peer_id = peer.core.id;
+
+            let ref mut endpoint = peer.endpoint;
+
+            let ref mut host_ctx = HostContext {
+                server: &mut self.core,
+                peer: &mut peer.core,
+            };
+
+            endpoint.flush(host_ctx);
+
+            while let Some(packet) = endpoint.pop_packet() {
+                self.core.events.push_back(Event::Receive(peer_id, packet));
+            }
+
+            if endpoint.is_closed() {
+                self.core.events.push_back(Event::Disconnect(peer_id));
+
+                self.peer_table.remove(peer_id);
+            }
+        }
+    }
+
+    fn disconnect(&mut self, peer_id: PeerId) {
+        if let Some(peer) = self.peer_table.get_mut(peer_id) {
+            let peer_id = peer.core.id;
+
+            let ref mut endpoint = peer.endpoint;
+
+            let ref mut host_ctx = HostContext {
+                server: &mut self.core,
+                peer: &mut peer.core,
+            };
+
+            endpoint.disconnect();
+        }
+    }
+
+    fn drop(&mut self, peer_id: PeerId) {
+        if let Some(peer) = self.peer_table.get_mut(peer_id) {
+            self.peer_table.remove(peer_id);
         }
     }
 }
@@ -559,19 +607,20 @@ impl Server {
         self.local_addr
     }
 
-    pub fn peer<'a>(&'a mut self, id: PeerId) -> Option<PeerHandle<'a>> {
-        if let Some(peer) = self.core.peer_table.get_mut(id) {
-            return Some(PeerHandle {
-                server: &mut self.core.core,
-                peer,
-            });
-        }
-
-        return None;
-    }
-
     pub fn peer_count(&self) -> usize {
         self.core.peer_table.count().into()
+    }
+
+    pub fn send(&mut self, peer_id: PeerId, packet_bytes: Box<[u8]>, mode: SendMode) {
+        self.core.send(peer_id, packet_bytes, mode);
+    }
+
+    pub fn flush(&mut self, peer_id: PeerId) {
+        self.core.flush(peer_id);
+    }
+
+    pub fn disconnect(&mut self, peer_id: PeerId) {
+        self.core.flush(peer_id);
     }
 }
 
@@ -603,30 +652,5 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
         if let Some(id) = timer_id.take() {
             self.server.timer_wheel.unset_timer(id);
         }
-    }
-}
-
-impl<'a> PeerHandle<'a> {
-    pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        println!("sending packet to {:?}!", self.peer.core.addr);
-        let _ = self.peer.endpoint.enqueue_packet(packet_bytes, mode);
-    }
-
-    pub fn flush(&mut self) {
-        let ref mut host_ctx = HostContext {
-            server: &mut self.server,
-            peer: &mut self.peer.core,
-        };
-
-        self.peer.endpoint.flush(host_ctx);
-
-        while let Some(packet) = self.peer.endpoint.pop_packet() {
-            self.server
-                .events
-                .push_back(Event::Receive(self.peer.core.id, packet));
-        }
-
-        // impossible to destroy peer in this situation - endpoint.flush() must never trigger a
-        // closure!
     }
 }
