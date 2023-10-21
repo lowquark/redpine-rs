@@ -54,6 +54,8 @@ struct Peer {
     core: PeerCore,
     // Endpoint representing this peer's connection
     endpoint: endpoint::Endpoint,
+    // Permits server operations from a peer handle
+    server: Rc<RefCell<ServerCore>>,
 }
 
 type PeerRc = Rc<RefCell<Peer>>;
@@ -190,7 +192,7 @@ impl PeerTimers {
 }
 
 impl Peer {
-    fn new(id: PeerId, addr: net::SocketAddr) -> Self {
+    fn new(id: PeerId, addr: net::SocketAddr, server: Rc<RefCell<ServerCore>>) -> Self {
         Self {
             core: PeerCore {
                 id,
@@ -198,6 +200,7 @@ impl Peer {
                 timers: PeerTimers::new(),
             },
             endpoint: endpoint::Endpoint::new(),
+            server,
         }
     }
 }
@@ -236,10 +239,10 @@ impl PeerTable {
         }
     }
 
-    pub fn insert(&mut self, addr: &net::SocketAddr) -> Option<(PeerId, PeerRc)> {
+    pub fn insert(&mut self, addr: &net::SocketAddr, server_rc: Rc<RefCell<ServerCore>>) -> Option<(PeerId, PeerRc)> {
         if self.addr_map.len() < self.array.len() && !self.addr_map.contains_key(addr) {
             let id = self.find_free_id();
-            let peer_rc = Rc::new(RefCell::new(Peer::new(id, addr.clone())));
+            let peer_rc = Rc::new(RefCell::new(Peer::new(id, addr.clone(), server_rc)));
 
             self.array[id as usize] = Some(Rc::clone(&peer_rc));
             self.addr_map.insert(addr.clone(), id);
@@ -320,8 +323,9 @@ impl ServerCore {
         peer_table: &mut PeerTable,
         sender_addr: &net::SocketAddr,
         now_ms: u64,
+        server_rc: &Rc<RefCell<ServerCore>>,
     ) {
-        if let Some((new_peer_id, peer_rc)) = peer_table.insert(sender_addr) {
+        if let Some((new_peer_id, peer_rc)) = peer_table.insert(sender_addr, Rc::clone(server_rc)) {
             // Notify user of inbound connection
             let handle = PeerHandle::new(peer_rc);
             self.events.push_back(Event::Connect(handle));
@@ -385,6 +389,7 @@ impl ServerCore {
         peer_table: &mut PeerTable,
         frame_bytes: &[u8],
         sender_addr: &net::SocketAddr,
+        server_rc: &Rc<RefCell<ServerCore>>,
     ) {
         let now_ms = self.time_now_ms();
 
@@ -413,7 +418,7 @@ impl ServerCore {
                 let valid = true;
 
                 if valid {
-                    self.process_handshake_beta(peer_table, sender_addr, now_ms);
+                    self.process_handshake_beta(peer_table, sender_addr, now_ms, server_rc);
                 }
             } else {
                 let valid = true;
@@ -432,10 +437,11 @@ impl ServerCore {
         &mut self,
         receiver: &mut SocketReceiver,
         peer_table: &mut PeerTable,
+        server_rc: &Rc<RefCell<ServerCore>>,
     ) {
         while let Ok(Some((frame_bytes, sender_addr))) = receiver.try_read_frame() {
             // Process this frame
-            self.process_frame(peer_table, frame_bytes, &sender_addr);
+            self.process_frame(peer_table, frame_bytes, &sender_addr, server_rc);
         }
     }
 
@@ -445,12 +451,13 @@ impl ServerCore {
         receiver: &mut SocketReceiver,
         peer_table: &mut PeerTable,
         wait_timeout: Option<time::Duration>,
+        server_rc: &Rc<RefCell<ServerCore>>,
     ) {
         if let Ok(Some((frame_bytes, sender_addr))) = receiver.wait_for_frame(wait_timeout) {
             // Process this frame
-            self.process_frame(peer_table, frame_bytes, &sender_addr);
+            self.process_frame(peer_table, frame_bytes, &sender_addr, server_rc);
             // Process any further frames without blocking
-            return self.process_available_frames(receiver, peer_table);
+            return self.process_available_frames(receiver, peer_table, server_rc);
         }
     }
 
@@ -577,7 +584,7 @@ impl Server {
         let mut core_ref = self.core.borrow_mut();
 
         if core_ref.events.is_empty() {
-            core_ref.process_available_frames(&mut self.receiver, &mut self.peer_table);
+            core_ref.process_available_frames(&mut self.receiver, &mut self.peer_table, &self.core);
 
             core_ref.process_timeouts(&mut self.peer_table, &mut self.timer_data_expired);
         }
@@ -597,6 +604,7 @@ impl Server {
                 &mut self.receiver,
                 &mut self.peer_table,
                 wait_timeout,
+                &self.core,
             );
 
             core_ref.process_timeouts(&mut self.peer_table, &mut self.timer_data_expired);
@@ -630,6 +638,7 @@ impl Server {
                     &mut self.receiver,
                     &mut self.peer_table,
                     Some(wait_timeout),
+                    &self.core,
                 );
 
                 core_ref.process_timeouts(&mut self.peer_table, &mut self.timer_data_expired);
@@ -678,9 +687,23 @@ impl PeerHandle {
 
     pub fn flush(&mut self) {
         let mut peer_ref = self.peer.borrow_mut();
+        let ref mut peer = *peer_ref;
 
-        // ???
-        // peer_ref.endpoint.flush(host_ctx);
+        let mut server_ref = peer.server.borrow_mut();
+        let ref mut server = *server_ref;
+
+        let peer_id = peer.core.id;
+
+        let ref mut endpoint = peer.endpoint;
+
+        let ref mut host_ctx = EndpointContext::new(server, &mut peer.core);
+
+        endpoint.flush(host_ctx);
+
+        while let Some(packet) = endpoint.pop_packet() {
+            let handle = PeerHandle::new(Rc::clone(&self.peer));
+            server.events.push_back(Event::Receive(handle, packet));
+        }
     }
 
     pub fn disconnect(&mut self) {
