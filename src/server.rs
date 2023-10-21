@@ -56,9 +56,11 @@ struct Peer {
     endpoint: endpoint::Endpoint,
 }
 
+type PeerRc = Rc<RefCell<Peer>>;
+
 struct PeerTable {
     // Array of peers indexed by ID
-    array: Vec<Option<Peer>>,
+    array: Vec<Option<PeerRc>>,
     // Mapping from sender address to peer ID
     addr_map: HashMap<net::SocketAddr, PeerId>,
 }
@@ -214,7 +216,7 @@ impl PeerTable {
         Self { array, addr_map }
     }
 
-    pub fn get_mut(&mut self, id: PeerId) -> Option<&mut Peer> {
+    pub fn get_mut(&mut self, id: PeerId) -> Option<&mut PeerRc> {
         if let Some(opt) = self.array.get_mut(id as usize) {
             opt.as_mut()
         } else {
@@ -222,7 +224,7 @@ impl PeerTable {
         }
     }
 
-    pub fn find_mut(&mut self, addr: &net::SocketAddr) -> Option<&mut Peer> {
+    pub fn find_mut(&mut self, addr: &net::SocketAddr) -> Option<&mut PeerRc> {
         if let Some(&id) = self.addr_map.get(addr) {
             self.get_mut(id)
         } else {
@@ -233,7 +235,7 @@ impl PeerTable {
     pub fn insert(&mut self, addr: &net::SocketAddr) -> Option<PeerId> {
         if self.addr_map.len() < self.array.len() && !self.addr_map.contains_key(addr) {
             let id = self.find_free_id();
-            let peer = Peer::new(id, addr.clone());
+            let peer = Rc::new(RefCell::new(Peer::new(id, addr.clone())));
 
             self.array[id as usize] = Some(peer);
             self.addr_map.insert(addr.clone(), id);
@@ -245,7 +247,7 @@ impl PeerTable {
 
     pub fn remove(&mut self, id: PeerId) {
         if let Some(ref peer) = self.array[id as usize] {
-            self.addr_map.remove(&peer.core.addr);
+            self.addr_map.remove(&peer.borrow().core.addr);
             self.array[id as usize] = None;
         } else {
             panic!("double free");
@@ -346,7 +348,10 @@ impl ServerCore {
         frame_bytes: &[u8],
         now_ms: u64,
     ) {
-        if let Some(peer) = peer_table.find_mut(sender_addr) {
+        if let Some(peer_rc) = peer_table.find_mut(sender_addr) {
+            let mut peer_ref = peer_rc.borrow_mut();
+            let ref mut peer = *peer_ref;
+
             let peer_id = peer.core.id;
             let ref mut endpoint = peer.endpoint;
 
@@ -360,6 +365,8 @@ impl ServerCore {
 
             if endpoint.is_closed() {
                 self.events.push_back(Event::Disconnect(peer_id));
+
+                std::mem::drop(peer_ref);
 
                 peer_table.remove(peer_id);
             }
@@ -447,7 +454,10 @@ impl ServerCore {
         timer_name: endpoint::TimerId,
         now_ms: u64,
     ) {
-        if let Some(peer) = peer_table.get_mut(peer_id) {
+        if let Some(peer_rc) = peer_table.get_mut(peer_id) {
+            let mut peer_ref = peer_rc.borrow_mut();
+            let ref mut peer = *peer_ref;
+
             let peer_id = peer.core.id;
 
             let ref mut endpoint = peer.endpoint;
@@ -462,6 +472,8 @@ impl ServerCore {
 
             if endpoint.is_closed() {
                 self.events.push_back(Event::Disconnect(peer_id));
+
+                std::mem::drop(peer_ref);
 
                 peer_table.remove(peer_id);
             }
@@ -519,14 +531,19 @@ impl ServerCore {
         packet_bytes: Box<[u8]>,
         mode: SendMode,
     ) {
-        if let Some(peer) = peer_table.get_mut(peer_id) {
-            println!("sending packet to {:?}!", peer.core.addr);
-            let _ = peer.endpoint.enqueue_packet(packet_bytes, mode);
+        if let Some(peer_rc) = peer_table.get_mut(peer_id) {
+            let mut peer_ref = peer_rc.borrow_mut();
+
+            println!("sending packet to {:?}!", peer_ref.core.addr);
+            let _ = peer_ref.endpoint.enqueue_packet(packet_bytes, mode);
         }
     }
 
     pub fn flush(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
-        if let Some(peer) = peer_table.get_mut(peer_id) {
+        if let Some(peer_rc) = peer_table.get_mut(peer_id) {
+            let mut peer_ref = peer_rc.borrow_mut();
+            let ref mut peer = *peer_ref;
+
             let peer_id = peer.core.id;
 
             let ref mut endpoint = peer.endpoint;
@@ -542,13 +559,18 @@ impl ServerCore {
             if endpoint.is_closed() {
                 self.events.push_back(Event::Disconnect(peer_id));
 
+                std::mem::drop(peer_ref);
+
                 peer_table.remove(peer_id);
             }
         }
     }
 
     pub fn disconnect(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
-        if let Some(peer) = peer_table.get_mut(peer_id) {
+        if let Some(peer_rc) = peer_table.get_mut(peer_id) {
+            let mut peer_ref = peer_rc.borrow_mut();
+            let ref mut peer = *peer_ref;
+
             let peer_id = peer.core.id;
 
             let ref mut endpoint = peer.endpoint;
@@ -560,7 +582,7 @@ impl ServerCore {
     }
 
     pub fn drop(&mut self, peer_table: &mut PeerTable, peer_id: PeerId) {
-        if let Some(peer) = peer_table.get_mut(peer_id) {
+        if let Some(_peer_rc) = peer_table.get_mut(peer_id) {
             peer_table.remove(peer_id);
         }
     }
