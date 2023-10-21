@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net;
@@ -50,7 +51,7 @@ struct PeerTable {
     addr_map: HashMap<net::SocketAddr, PeerId>,
 }
 
-struct ServerCoreCore {
+struct ServerCore {
     socket: Rc<net::UdpSocket>,
 
     timer_wheel: TimerWheel,
@@ -60,7 +61,7 @@ struct ServerCoreCore {
 
 pub struct Server {
     // Interesting server data
-    core: ServerCoreCore,
+    core: Rc<RefCell<ServerCore>>,
 
     // Table of connected peers
     peer_table: PeerTable,
@@ -83,7 +84,7 @@ pub struct Server {
 }
 
 struct HostContext<'a> {
-    server: &'a mut ServerCoreCore,
+    server: &'a mut ServerCore,
     peer: &'a mut PeerCore,
 }
 
@@ -195,7 +196,7 @@ impl PeerTable {
 }
 
 fn process_handshake_alpha(
-    core: &mut ServerCoreCore,
+    core: &mut ServerCore,
     peer_table: &mut PeerTable,
     sender_addr: &net::SocketAddr,
 ) {
@@ -204,7 +205,7 @@ fn process_handshake_alpha(
 }
 
 fn process_handshake_beta(
-    core: &mut ServerCoreCore,
+    core: &mut ServerCore,
     peer_table: &mut PeerTable,
     sender_addr: &net::SocketAddr,
     now_ms: u64,
@@ -234,7 +235,7 @@ fn process_handshake_beta(
 }
 
 fn process_peer_frame(
-    core: &mut ServerCoreCore,
+    core: &mut ServerCore,
     peer_table: &mut PeerTable,
     sender_addr: &net::SocketAddr,
     frame_bytes: &[u8],
@@ -261,7 +262,7 @@ fn process_peer_frame(
 }
 
 fn process_frame(
-    core: &mut ServerCoreCore,
+    core: &mut ServerCore,
     peer_table: &mut PeerTable,
     frame_bytes: &[u8],
     sender_addr: &net::SocketAddr,
@@ -307,7 +308,7 @@ fn process_frame(
 }
 
 fn process_timeout(
-    core: &mut ServerCoreCore,
+    core: &mut ServerCore,
     peer_table: &mut PeerTable,
     peer_id: PeerId,
     timer_name: endpoint::TimerId,
@@ -335,7 +336,7 @@ fn process_timeout(
 }
 
 fn send(
-    core: &mut ServerCoreCore,
+    core: &mut ServerCore,
     peer_table: &mut PeerTable,
     peer_id: PeerId,
     packet_bytes: Box<[u8]>,
@@ -347,7 +348,7 @@ fn send(
     }
 }
 
-fn flush(core: &mut ServerCoreCore, peer_table: &mut PeerTable, peer_id: PeerId) {
+fn flush(core: &mut ServerCore, peer_table: &mut PeerTable, peer_id: PeerId) {
     if let Some(peer) = peer_table.get_mut(peer_id) {
         let peer_id = peer.core.id;
 
@@ -369,7 +370,7 @@ fn flush(core: &mut ServerCoreCore, peer_table: &mut PeerTable, peer_id: PeerId)
     }
 }
 
-fn disconnect(core: &mut ServerCoreCore, peer_table: &mut PeerTable, peer_id: PeerId) {
+fn disconnect(core: &mut ServerCore, peer_table: &mut PeerTable, peer_id: PeerId) {
     if let Some(peer) = peer_table.get_mut(peer_id) {
         let peer_id = peer.core.id;
 
@@ -381,7 +382,7 @@ fn disconnect(core: &mut ServerCoreCore, peer_table: &mut PeerTable, peer_id: Pe
     }
 }
 
-fn drop(core: &mut ServerCoreCore, peer_table: &mut PeerTable, peer_id: PeerId) {
+fn drop(core: &mut ServerCore, peer_table: &mut PeerTable, peer_id: PeerId) {
     if let Some(peer) = peer_table.get_mut(peer_id) {
         peer_table.remove(peer_id);
     }
@@ -396,10 +397,12 @@ impl Server {
     fn process_frame(&mut self, frame_size: usize, sender_addr: &net::SocketAddr) {
         let now_ms = self.time_now_ms();
 
+        let mut core_ref = self.core.borrow_mut();
+
         let ref frame_bytes = self.recv_buffer[..frame_size];
 
         process_frame(
-            &mut self.core,
+            &mut *core_ref,
             &mut self.peer_table,
             frame_bytes,
             sender_addr,
@@ -410,9 +413,9 @@ impl Server {
     fn process_timeouts(&mut self) {
         let now_ms = self.time_now_ms();
 
-        self.core
-            .timer_wheel
-            .step(now_ms, &mut self.timer_data_expired);
+        let mut core_ref = self.core.borrow_mut();
+
+        core_ref.timer_wheel.step(now_ms, &mut self.timer_data_expired);
 
         for timer_data in self.timer_data_expired.drain(..) {
             println!("Timer expired!");
@@ -421,7 +424,7 @@ impl Server {
             let timer_name = timer_data.name;
 
             process_timeout(
-                &mut self.core,
+                &mut *core_ref,
                 &mut self.peer_table,
                 peer_id,
                 timer_name,
@@ -433,7 +436,9 @@ impl Server {
     /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
     /// otherwise.
     fn try_read_frame(&mut self) -> std::io::Result<Option<(usize, net::SocketAddr)>> {
-        match self.core.socket.recv_from(&mut self.recv_buffer) {
+        let core_ref = self.core.borrow();
+
+        match core_ref.socket.recv_from(&mut self.recv_buffer) {
             Ok((frame_len, sender_addr)) => Ok(Some((frame_len, sender_addr))),
             Err(err) => match err.kind() {
                 // The only acceptable error is WouldBlock, indicating no packet
@@ -449,10 +454,12 @@ impl Server {
         &mut self,
         timeout: Option<time::Duration>,
     ) -> std::io::Result<Option<(usize, net::SocketAddr)>> {
+        let core_ref = self.core.borrow();
+
         // Wait for a readable event (must be done prior to each wait() call)
         // TODO: Does this work if the socket is already readable?
         self.poller.modify(
-            &*self.core.socket,
+            &*core_ref.socket,
             polling::Event::readable(SOCKET_POLLING_KEY),
         )?;
 
@@ -461,6 +468,7 @@ impl Server {
         let n = self.poller.wait(&mut self.poller_events, timeout)?;
 
         if n > 0 {
+            std::mem::drop(core_ref);
             // The socket is readable - read in confidence
             self.try_read_frame()
         } else {
@@ -505,8 +513,9 @@ impl Server {
 
         let now_ms = self.time_now_ms();
 
-        return self
-            .core
+        let core_ref = self.core.borrow();
+
+        return core_ref
             .timer_wheel
             .next_expiration_time_ms()
             .map(|expire_time_ms| time::Duration::from_millis(expire_time_ms - now_ms));
@@ -534,11 +543,11 @@ impl Server {
         }
 
         Ok(Self {
-            core: ServerCoreCore {
+            core: Rc::new(RefCell::new(ServerCore {
                 socket: Rc::new(socket),
                 timer_wheel: TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
                 events: VecDeque::new(),
-            },
+            })),
             peer_table: PeerTable::new(peer_count_max),
             time_ref: time::Instant::now(),
             local_addr,
@@ -555,13 +564,19 @@ impl Server {
     /// Returns `None` if no events are available, or if an error was encountered while reading
     /// from the internal socket.
     pub fn poll_event(&mut self) -> Option<Event> {
-        if self.core.events.is_empty() {
+        let core_ref = self.core.borrow();
+
+        if core_ref.events.is_empty() {
+            std::mem::drop(core_ref);
+
             self.process_available_frames();
 
             self.process_timeouts();
         }
 
-        return self.core.events.pop_front();
+        let mut core_ref = self.core.borrow_mut();
+
+        return core_ref.events.pop_front();
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
@@ -574,7 +589,9 @@ impl Server {
 
             self.process_timeouts();
 
-            if let Some(event) = self.core.events.pop_front() {
+            let mut core_ref = self.core.borrow_mut();
+
+            if let Some(event) = core_ref.events.pop_front() {
                 return event;
             }
         }
@@ -586,7 +603,11 @@ impl Server {
     ///
     /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
-        if self.core.events.is_empty() {
+        let core_ref = self.core.borrow();
+
+        if core_ref.events.is_empty() {
+            std::mem::drop(core_ref);
+
             let mut remaining_timeout = timeout;
             let mut wait_begin = time::Instant::now();
 
@@ -601,9 +622,11 @@ impl Server {
 
                 self.process_timeouts();
 
-                if !self.core.events.is_empty() {
+                let mut core_ref = self.core.borrow_mut();
+
+                if !core_ref.events.is_empty() {
                     // Found what we're looking for
-                    break;
+                    return core_ref.events.pop_front();
                 }
 
                 let now = time::Instant::now();
@@ -619,7 +642,9 @@ impl Server {
             }
         }
 
-        return self.core.events.pop_front();
+        let mut core_ref = self.core.borrow_mut();
+
+        return core_ref.events.pop_front();
     }
 
     pub fn local_addr(&self) -> net::SocketAddr {
@@ -631,8 +656,10 @@ impl Server {
     }
 
     pub fn send(&mut self, peer_id: PeerId, packet_bytes: Box<[u8]>, mode: SendMode) {
+        let mut core_ref = self.core.borrow_mut();
+
         send(
-            &mut self.core,
+            &mut *core_ref,
             &mut self.peer_table,
             peer_id,
             packet_bytes,
@@ -641,16 +668,20 @@ impl Server {
     }
 
     pub fn flush(&mut self, peer_id: PeerId) {
-        flush(&mut self.core, &mut self.peer_table, peer_id);
+        let mut core_ref = self.core.borrow_mut();
+
+        flush(&mut *core_ref, &mut self.peer_table, peer_id);
     }
 
     pub fn disconnect(&mut self, peer_id: PeerId) {
-        disconnect(&mut self.core, &mut self.peer_table, peer_id);
+        let mut core_ref = self.core.borrow_mut();
+
+        disconnect(&mut *core_ref, &mut self.peer_table, peer_id);
     }
 }
 
 impl<'a> HostContext<'a> {
-    fn new(server: &'a mut ServerCoreCore, peer: &'a mut PeerCore) -> Self {
+    fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore) -> Self {
         Self { server, peer }
     }
 }
