@@ -189,6 +189,11 @@ impl Client {
                     }
                     HandshakePhase::Beta => {
                         if frame_bytes == [0xB1] {
+                            // Reset any previous timers
+                            self.timers.rto_timer.timeout_ms = None;
+                            self.timers.recv_timer.timeout_ms = None;
+
+                            // Create an endpoint now that we're connected
                             let ref mut host_ctx = HostContext {
                                 timers: &mut self.timers,
                                 socket: &self.socket,
@@ -199,14 +204,13 @@ impl Client {
 
                             endpoint.init(now_ms, host_ctx);
 
+                            // Send queued up packets
                             for (packet, mode) in state.packet_buffer.drain(..) {
                                 endpoint.send(packet, mode, host_ctx);
                             }
 
+                            // Switch to active state
                             self.state = State::Active(ActiveState { endpoint });
-
-                            self.timers.rto_timer.timeout_ms = None;
-                            self.timers.recv_timer.timeout_ms = None;
                         }
                     }
                 },
