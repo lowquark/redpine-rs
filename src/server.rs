@@ -269,6 +269,11 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         let _ = self.server.socket.send_to(frame_bytes, &self.peer.addr);
     }
 
+    fn receive(&mut self, packet_bytes: Box<[u8]>) {
+        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
+        self.server.events.push_back(Event::Receive(handle, packet_bytes));
+    }
+
     fn set_timer(&mut self, name: endpoint::TimerName, time_ms: u64) {
         let timer_id = self.peer.timers.get_mut(name);
 
@@ -291,6 +296,20 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         if let Some(id) = timer_id.take() {
             self.server.timer_wheel.unset_timer(id);
         }
+    }
+
+    fn disconnect(&mut self) {
+        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
+        self.server.events.push_back(Event::Disconnect(handle));
+
+        self.server.peer_table.remove(&self.peer.addr);
+    }
+
+    fn timeout(&mut self) {
+        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
+        self.server.events.push_back(Event::Timeout(handle));
+
+        self.server.peer_table.remove(&self.peer.addr);
     }
 }
 
@@ -383,18 +402,6 @@ fn handle_connected_frame(server_rc: &ServerCoreRc, peer_rc: &PeerRc, frame_byte
     let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
     endpoint.handle_frame(frame_bytes, host_ctx);
-
-    while let Some(packet) = endpoint.pop_packet() {
-        let handle = PeerHandle::new(Rc::clone(&peer_rc));
-        server.events.push_back(Event::Receive(handle, packet));
-    }
-
-    if endpoint.is_closed() {
-        let handle = PeerHandle::new(Rc::clone(&peer_rc));
-        server.events.push_back(Event::Disconnect(handle));
-
-        server.peer_table.remove(&peer.core.addr);
-    }
 }
 
 fn handle_frame(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
@@ -464,18 +471,6 @@ fn handle_timer(
     let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
     endpoint.handle_timer(timer_name, now_ms, host_ctx);
-
-    while let Some(packet) = endpoint.pop_packet() {
-        let handle = PeerHandle::new(Rc::clone(&peer_rc));
-        server.events.push_back(Event::Receive(handle, packet));
-    }
-
-    if endpoint.is_closed() {
-        let handle = PeerHandle::new(Rc::clone(&peer_rc));
-        server.events.push_back(Event::Disconnect(handle));
-
-        server.peer_table.remove(&peer.core.addr);
-    }
 }
 
 fn handle_send(
@@ -484,11 +479,17 @@ fn handle_send(
     packet_bytes: Box<[u8]>,
     mode: SendMode,
 ) {
+    let mut server_ref = server_rc.borrow_mut();
+    let ref mut server = *server_ref;
+
     let mut peer_ref = peer_rc.borrow_mut();
     let ref mut peer = *peer_ref;
 
-    println!("sending packet to {:?}!", peer.core.addr);
-    let _ = peer.endpoint.enqueue_packet(packet_bytes, mode);
+    let ref mut endpoint = peer.endpoint;
+
+    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
+
+    endpoint.send(packet_bytes, mode, host_ctx);
 }
 
 fn handle_flush(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
@@ -503,18 +504,6 @@ fn handle_flush(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
     let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
     endpoint.flush(host_ctx);
-
-    while let Some(packet) = endpoint.pop_packet() {
-        let handle = PeerHandle::new(Rc::clone(&peer_rc));
-        server.events.push_back(Event::Receive(handle, packet));
-    }
-
-    if endpoint.is_closed() {
-        let handle = PeerHandle::new(Rc::clone(&peer_rc));
-        server.events.push_back(Event::Disconnect(handle));
-
-        server.peer_table.remove(&peer.core.addr);
-    }
 }
 
 fn handle_disconnect(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
@@ -529,18 +518,6 @@ fn handle_disconnect(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
     let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
     endpoint.disconnect(host_ctx);
-
-    while let Some(packet) = endpoint.pop_packet() {
-        let handle = PeerHandle::new(Rc::clone(&peer_rc));
-        server.events.push_back(Event::Receive(handle, packet));
-    }
-
-    if endpoint.is_closed() {
-        let handle = PeerHandle::new(Rc::clone(&peer_rc));
-        server.events.push_back(Event::Disconnect(handle));
-
-        server.peer_table.remove(&peer.core.addr);
-    }
 }
 
 impl Server {

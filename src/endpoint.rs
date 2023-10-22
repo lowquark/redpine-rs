@@ -11,8 +11,13 @@ pub enum TimerName {
 
 pub trait HostContext {
     fn send(&mut self, frame_bytes: &[u8]);
+    fn receive(&mut self, packet_bytes: Box<[u8]>);
+
     fn set_timer(&mut self, timer: TimerName, time_ms: u64);
     fn unset_timer(&mut self, timer: TimerName);
+
+    fn disconnect(&mut self);
+    fn timeout(&mut self);
 }
 
 struct FrameTxWindow {
@@ -253,7 +258,10 @@ impl Endpoint {
         }
     }
 
-    pub fn enqueue_packet(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+    pub fn send<C>(&mut self, packet_bytes: Box<[u8]>, mode: SendMode, ctx: &mut C)
+    where
+        C: HostContext,
+    {
         /*
         match mode {
             SendMode::Reliable => {
@@ -264,10 +272,6 @@ impl Endpoint {
             }
         }
         */
-    }
-
-    pub fn pop_packet(&mut self) -> Option<Box<[u8]>> {
-        self.rx_packets.pop_front()
     }
 
     fn handle_primary<C>(

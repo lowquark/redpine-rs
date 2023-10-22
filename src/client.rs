@@ -44,6 +44,7 @@ struct Timers {
 struct HostContext<'a> {
     timers: &'a mut Timers,
     socket: &'a net::UdpSocket,
+    events: &'a mut VecDeque<Event>,
 }
 
 pub enum Event {
@@ -77,6 +78,10 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
         let _ = self.socket.send(frame_bytes);
     }
 
+    fn receive(&mut self, packet_bytes: Box<[u8]>) {
+        self.events.push_back(Event::Receive(packet_bytes))
+    }
+
     fn set_timer(&mut self, timer: endpoint::TimerName, time_ms: u64) {
         match timer {
             endpoint::TimerName::Rto => {
@@ -97,6 +102,20 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
                 self.timers.recv_timer.timeout_ms = None;
             }
         }
+    }
+
+    fn disconnect(&mut self) {
+        self.events.push_back(Event::Disconnect);
+
+        todo!();
+        // self.state = State::Closed;
+    }
+
+    fn timeout(&mut self) {
+        self.events.push_back(Event::Timeout);
+
+        todo!();
+        // self.state = State::Closed;
     }
 }
 
@@ -166,10 +185,16 @@ impl Client {
                     }
                     HandshakePhase::Beta => {
                         if frame_bytes == [0xB1] {
+                            let ref mut host_ctx = HostContext {
+                                timers: &mut self.timers,
+                                socket: &self.socket,
+                                events: &mut self.events,
+                            };
+
                             let mut endpoint = endpoint::Endpoint::new();
 
                             for (packet, mode) in state.packet_buffer.drain(..) {
-                                endpoint.enqueue_packet(packet, mode);
+                                endpoint.send(packet, mode, host_ctx);
                             }
 
                             self.state = State::Active(ActiveState { endpoint });
@@ -185,18 +210,10 @@ impl Client {
                     let ref mut host_ctx = HostContext {
                         timers: &mut self.timers,
                         socket: &self.socket,
+                        events: &mut self.events,
                     };
 
                     state.endpoint.handle_frame(frame_bytes, host_ctx);
-
-                    while let Some(packet) = state.endpoint.pop_packet() {
-                        self.events.push_back(Event::Receive(packet));
-                    }
-
-                    if state.endpoint.is_closed() {
-                        self.events.push_back(Event::Disconnect);
-                        self.state = State::Closed;
-                    }
                 }
                 State::Closed => {}
             }
@@ -280,18 +297,10 @@ impl Client {
                 let ref mut host_ctx = HostContext {
                     timers: &mut self.timers,
                     socket: &self.socket,
+                    events: &mut self.events,
                 };
 
                 state.endpoint.handle_timer(timer_id, now_ms, host_ctx);
-
-                while let Some(packet) = state.endpoint.pop_packet() {
-                    self.events.push_back(Event::Receive(packet));
-                }
-
-                if state.endpoint.is_closed() {
-                    self.events.push_back(Event::Disconnect);
-                    self.state = State::Closed;
-                }
             }
             State::Closed => {}
         }
@@ -455,7 +464,13 @@ impl Client {
                 state.packet_buffer.push((packet_bytes, mode));
             }
             State::Active(state) => {
-                state.endpoint.enqueue_packet(packet_bytes, mode);
+                let ref mut host_ctx = HostContext {
+                    timers: &mut self.timers,
+                    socket: &self.socket,
+                    events: &mut self.events,
+                };
+
+                state.endpoint.send(packet_bytes, mode, host_ctx);
             }
             State::Closed => {}
         }
@@ -468,6 +483,7 @@ impl Client {
                 let ref mut host_ctx = HostContext {
                     timers: &mut self.timers,
                     socket: &self.socket,
+                    events: &mut self.events,
                 };
 
                 state.endpoint.flush(host_ctx);
