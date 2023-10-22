@@ -296,6 +296,8 @@ impl Endpoint {
             }
         }
         */
+
+        self.actual_flush(false, false, true, ctx);
     }
 
     fn handle_primary<C>(

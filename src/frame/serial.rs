@@ -356,25 +356,18 @@ impl BlockSerial for StreamAck {
 
     unsafe fn read(rd: &mut Reader) -> Self {
         let info = rd.read_u8();
-
         let data_id = rd.read_u32();
-
-        let unrel_id = if info & 0x01 != 0 {
-            Some(rd.read_u32())
-        } else {
-            None
-        };
-
-        let rel_id = if info & 0x02 != 0 {
-            Some(rd.read_u32())
-        } else {
-            None
-        };
+        let unrel_id = rd.read_u32();
+        let rel_id = rd.read_u32();
 
         Self {
             data_id,
-            unrel_id,
-            rel_id,
+            unrel_id: if info & 0x01 != 0 {
+                Some(unrel_id)
+            } else {
+                None
+            },
+            rel_id: if info & 0x02 != 0 { Some(rel_id) } else { None },
         }
     }
 
