@@ -512,10 +512,6 @@ impl Endpoint {
         C: HostContext,
     {
     }
-
-    pub fn is_closed(&self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
@@ -535,12 +531,24 @@ mod tests {
             println!("send {:02X?}", frame_bytes);
         }
 
+        fn receive(&mut self, packet_bytes: Box<[u8]>) {
+            println!("receive {:02X?}", packet_bytes);
+        }
+
         fn set_timer(&mut self, timer: TimerName, time_ms: u64) {
             println!("Set timer!");
         }
 
         fn unset_timer(&mut self, timer: TimerName) {
             println!("Unset timer!");
+        }
+
+        fn disconnect(&mut self) {
+            println!("disconnect");
+        }
+
+        fn timeout(&mut self) {
+            println!("disconnect");
         }
     }
 

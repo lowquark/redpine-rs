@@ -398,10 +398,11 @@ fn handle_connected_frame(server_rc: &ServerCoreRc, peer_rc: &PeerRc, frame_byte
     let ref mut peer = *peer_ref;
 
     let ref mut endpoint = peer.endpoint;
+    let ref mut peer_core = peer.core;
 
-    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
+    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
 
-    endpoint.handle_frame(frame_bytes, host_ctx);
+    endpoint.handle_frame(frame_bytes, ctx);
 }
 
 fn handle_frame(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
@@ -464,13 +465,14 @@ fn handle_timer(
     let mut peer_ref = peer_rc.borrow_mut();
     let ref mut peer = *peer_ref;
 
-    println!("Timer expired for peer {}!", peer.core.id);
-
     let ref mut endpoint = peer.endpoint;
+    let ref mut peer_core = peer.core;
 
-    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
+    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
 
-    endpoint.handle_timer(timer_name, now_ms, host_ctx);
+    endpoint.handle_timer(timer_name, now_ms, ctx);
+
+    println!("Timer expired for peer {}!", peer_core.id);
 }
 
 fn handle_send(
@@ -486,10 +488,11 @@ fn handle_send(
     let ref mut peer = *peer_ref;
 
     let ref mut endpoint = peer.endpoint;
+    let ref mut peer_core = peer.core;
 
-    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
+    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
 
-    endpoint.send(packet_bytes, mode, host_ctx);
+    endpoint.send(packet_bytes, mode, ctx);
 }
 
 fn handle_flush(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
@@ -500,10 +503,11 @@ fn handle_flush(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
     let ref mut peer = *peer_ref;
 
     let ref mut endpoint = peer.endpoint;
+    let ref mut peer_core = peer.core;
 
-    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
+    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
 
-    endpoint.flush(host_ctx);
+    endpoint.flush(ctx);
 }
 
 fn handle_disconnect(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
@@ -514,10 +518,11 @@ fn handle_disconnect(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
     let ref mut peer = *peer_ref;
 
     let ref mut endpoint = peer.endpoint;
+    let ref mut peer_core = peer.core;
 
-    let ref mut host_ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
+    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
 
-    endpoint.disconnect(host_ctx);
+    endpoint.disconnect(ctx);
 }
 
 impl Server {
@@ -680,21 +685,18 @@ impl PeerHandle {
     }
 
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        // (Do nothing if the server object has been dropped)
         if let Some(server_rc) = Weak::upgrade(&self.peer.borrow().server_weak) {
             handle_send(&server_rc, &self.peer, packet_bytes, mode);
         }
     }
 
     pub fn flush(&mut self) {
-        // (Do nothing if the server object has been dropped)
         if let Some(server_rc) = Weak::upgrade(&self.peer.borrow().server_weak) {
             handle_flush(&server_rc, &self.peer);
         }
     }
 
     pub fn disconnect(&mut self) {
-        // (Do nothing if the server object has been dropped)
         if let Some(server_rc) = Weak::upgrade(&self.peer.borrow().server_weak) {
             handle_disconnect(&server_rc, &self.peer);
         }
