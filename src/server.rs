@@ -227,14 +227,20 @@ impl PeerTable {
     }
 
     pub fn insert(&mut self, addr: &net::SocketAddr, server_rc: &ServerCoreRc) -> Option<PeerRc> {
-        if let Some(new_id) = self.free_ids.pop() {
-            let server_weak = Rc::downgrade(server_rc);
-            let peer = Peer::new(new_id, addr.clone(), server_weak);
-            let peer_rc = Rc::new(RefCell::new(peer));
+        // Ensure a peer does not already exist at this address
+        if !self.peers.contains_key(addr) {
+            // Allocate an ID (an empty stack means we have reached the peer limit)
+            if let Some(new_id) = self.free_ids.pop() {
+                // Create new peer object
+                let server_weak = Rc::downgrade(server_rc);
+                let peer = Peer::new(new_id, addr.clone(), server_weak);
+                let peer_rc = Rc::new(RefCell::new(peer));
 
-            self.peers.insert(addr.clone(), Rc::clone(&peer_rc));
+                // Associate with given address
+                self.peers.insert(addr.clone(), Rc::clone(&peer_rc));
 
-            return Some(peer_rc);
+                return Some(peer_rc);
+            }
         }
 
         return None;
