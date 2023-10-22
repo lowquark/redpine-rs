@@ -277,7 +277,9 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
 
     fn receive(&mut self, packet_bytes: Box<[u8]>) {
         let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
-        self.server.events.push_back(Event::Receive(handle, packet_bytes));
+        self.server
+            .events
+            .push_back(Event::Receive(handle, packet_bytes));
     }
 
     fn set_timer(&mut self, name: endpoint::TimerName, time_ms: u64) {
@@ -302,6 +304,11 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         if let Some(id) = timer_id.take() {
             self.server.timer_wheel.unset_timer(id);
         }
+    }
+
+    fn connect(&mut self) {
+        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
+        self.server.events.push_back(Event::Connect(handle));
     }
 
     fn disconnect(&mut self) {
@@ -364,51 +371,47 @@ fn handle_handshake_alpha(server_rc: &ServerCoreRc, sender_addr: &net::SocketAdd
 }
 
 fn handle_handshake_beta(server_rc: &ServerCoreRc, sender_addr: &net::SocketAddr) {
-    let mut server_ref = server_rc.borrow_mut();
-    let ref mut server = *server_ref;
+    let ref mut server = *server_rc.borrow_mut();
 
-    let now_ms = server.time_now_ms();
+    if let Some(peer_rc) = server.peer_table.insert(sender_addr, server_rc) {
+        let now_ms = server.time_now_ms();
 
-    if let Some(peer_rc) = server_ref.peer_table.insert(sender_addr, server_rc) {
-        let new_peer_id = peer_rc.borrow().core.id;
+        let ref mut peer = *peer_rc.borrow_mut();
 
-        // Notify user of inbound connection
-        let handle = PeerHandle::new(Rc::clone(&peer_rc));
-        server_ref.events.push_back(Event::Connect(handle));
+        let ref mut endpoint = peer.endpoint;
+        let ref mut peer_core = peer.core;
 
-        // Set a dummy timer just for fun
-        server_ref.timer_wheel.set_timer(
-            now_ms + 500,
-            PeerTimerData {
-                peer_rc,
-                timer_name: endpoint::TimerName::Rto,
-            },
-        );
+        let ref mut ctx = EndpointContext::new(server, peer_core, &peer_rc);
+
+        endpoint.init(now_ms, ctx);
 
         println!(
             "created peer {}, for sender address {:?}",
-            new_peer_id, sender_addr
+            peer_core.id, sender_addr
         );
     }
 
     // Always send an ack in case a previous ack was dropped.
     println!("acking phase β...");
-    let _ = server_ref.socket.send_to(&[0xB1], sender_addr);
+    let _ = server.socket.send_to(&[0xB1], sender_addr);
 }
 
-fn handle_connected_frame(server_rc: &ServerCoreRc, peer_rc: &PeerRc, frame_bytes: &[u8]) {
-    let mut server_ref = server_rc.borrow_mut();
-    let ref mut server = *server_ref;
+fn handle_frame_other(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
+    let ref mut server = *server_rc.borrow_mut();
 
-    let mut peer_ref = peer_rc.borrow_mut();
-    let ref mut peer = *peer_ref;
+    // If a peer is associated with this address, deliver this frame to its endpoint
+    if let Some(peer_rc) = server.peer_table.find(sender_addr) {
+        let mut peer_rc = Rc::clone(&peer_rc);
 
-    let ref mut endpoint = peer.endpoint;
-    let ref mut peer_core = peer.core;
+        let ref mut peer = *peer_rc.borrow_mut();
 
-    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
+        let ref mut endpoint = peer.endpoint;
+        let ref mut peer_core = peer.core;
 
-    endpoint.handle_frame(frame_bytes, ctx);
+        let ref mut ctx = EndpointContext::new(server, peer_core, &peer_rc);
+
+        endpoint.handle_frame(frame_bytes, ctx);
+    }
 }
 
 fn handle_frame(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
@@ -443,15 +446,7 @@ fn handle_frame(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net:
             let valid = true;
 
             if valid {
-                let server_ref = server_rc.borrow();
-
-                if let Some(peer_rc) = server_ref.peer_table.find(sender_addr) {
-                    let peer_rc = Rc::clone(&peer_rc);
-
-                    std::mem::drop(server_ref);
-
-                    handle_connected_frame(server_rc, &peer_rc, frame_bytes);
-                }
+                handle_frame_other(server_rc, frame_bytes, sender_addr);
             }
         }
     } else {
@@ -465,20 +460,12 @@ fn handle_timer(
     timer_name: endpoint::TimerName,
     now_ms: u64,
 ) {
-    let mut server_ref = server_rc.borrow_mut();
-    let ref mut server = *server_ref;
+    let ref mut server = *server_rc.borrow_mut();
+    let ref mut peer = *peer_rc.borrow_mut();
 
-    let mut peer_ref = peer_rc.borrow_mut();
-    let ref mut peer = *peer_ref;
+    let ref mut ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
-    let ref mut endpoint = peer.endpoint;
-    let ref mut peer_core = peer.core;
-
-    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
-
-    endpoint.handle_timer(timer_name, now_ms, ctx);
-
-    println!("Timer expired for peer {}!", peer_core.id);
+    peer.endpoint.handle_timer(timer_name, now_ms, ctx);
 }
 
 fn handle_send(
@@ -487,48 +474,30 @@ fn handle_send(
     packet_bytes: Box<[u8]>,
     mode: SendMode,
 ) {
-    let mut server_ref = server_rc.borrow_mut();
-    let ref mut server = *server_ref;
+    let ref mut server = *server_rc.borrow_mut();
+    let ref mut peer = *peer_rc.borrow_mut();
 
-    let mut peer_ref = peer_rc.borrow_mut();
-    let ref mut peer = *peer_ref;
+    let ref mut ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
-    let ref mut endpoint = peer.endpoint;
-    let ref mut peer_core = peer.core;
-
-    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
-
-    endpoint.send(packet_bytes, mode, ctx);
+    peer.endpoint.send(packet_bytes, mode, ctx);
 }
 
 fn handle_flush(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
-    let mut server_ref = server_rc.borrow_mut();
-    let ref mut server = *server_ref;
+    let ref mut server = *server_rc.borrow_mut();
+    let ref mut peer = *peer_rc.borrow_mut();
 
-    let mut peer_ref = peer_rc.borrow_mut();
-    let ref mut peer = *peer_ref;
+    let ref mut ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
-    let ref mut endpoint = peer.endpoint;
-    let ref mut peer_core = peer.core;
-
-    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
-
-    endpoint.flush(ctx);
+    peer.endpoint.flush(ctx);
 }
 
 fn handle_disconnect(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
-    let mut server_ref = server_rc.borrow_mut();
-    let ref mut server = *server_ref;
+    let ref mut server = *server_rc.borrow_mut();
+    let ref mut peer = *peer_rc.borrow_mut();
 
-    let mut peer_ref = peer_rc.borrow_mut();
-    let ref mut peer = *peer_ref;
+    let ref mut ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
 
-    let ref mut endpoint = peer.endpoint;
-    let ref mut peer_core = peer.core;
-
-    let ref mut ctx = EndpointContext::new(server, peer_core, peer_rc);
-
-    endpoint.disconnect(ctx);
+    peer.endpoint.disconnect(ctx);
 }
 
 impl Server {

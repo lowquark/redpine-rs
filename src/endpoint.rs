@@ -16,6 +16,7 @@ pub trait HostContext {
     fn set_timer(&mut self, timer: TimerName, time_ms: u64);
     fn unset_timer(&mut self, timer: TimerName);
 
+    fn connect(&mut self);
     fn disconnect(&mut self);
     fn timeout(&mut self);
 }
@@ -258,6 +259,16 @@ impl Endpoint {
         }
     }
 
+    pub fn init<C>(&mut self, now_ms: u64, ctx: &mut C)
+    where
+        C: HostContext,
+    {
+        ctx.connect();
+
+        // Set a dummy timer, just for fun
+        ctx.set_timer(TimerName::Rto, now_ms + 500);
+    }
+
     pub fn send<C>(&mut self, packet_bytes: Box<[u8]>, mode: SendMode, ctx: &mut C)
     where
         C: HostContext,
@@ -350,6 +361,12 @@ impl Endpoint {
     where
         C: HostContext,
     {
+        match timer {
+            TimerName::Rto => {
+                println!("Rto timer expired!");
+            }
+            TimerName::Receive => {}
+        }
     }
 
     fn actual_flush<C>(&mut self, ack_unrel: bool, ack_rel: bool, try_send_data: bool, ctx: &mut C)
@@ -541,6 +558,10 @@ mod tests {
 
         fn unset_timer(&mut self, timer: TimerName) {
             println!("Unset timer!");
+        }
+
+        fn connect(&mut self) {
+            println!("connect");
         }
 
         fn disconnect(&mut self) {

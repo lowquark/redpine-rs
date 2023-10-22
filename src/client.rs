@@ -104,6 +104,10 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
         }
     }
 
+    fn connect(&mut self) {
+        self.events.push_back(Event::Connect);
+    }
+
     fn disconnect(&mut self) {
         self.events.push_back(Event::Disconnect);
 
@@ -193,6 +197,8 @@ impl Client {
 
                             let mut endpoint = endpoint::Endpoint::new();
 
+                            endpoint.init(now_ms, host_ctx);
+
                             for (packet, mode) in state.packet_buffer.drain(..) {
                                 endpoint.send(packet, mode, host_ctx);
                             }
@@ -201,8 +207,6 @@ impl Client {
 
                             self.timers.rto_timer.timeout_ms = None;
                             self.timers.recv_timer.timeout_ms = None;
-
-                            self.events.push_back(Event::Connect);
                         }
                     }
                 },
