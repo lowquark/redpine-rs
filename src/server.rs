@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time;
 
 use super::endpoint;
@@ -55,7 +55,7 @@ struct Peer {
     // Endpoint representing this peer's connection
     endpoint: endpoint::Endpoint,
     // Permits server operations from a peer handle
-    server: ServerCoreRc,
+    server_weak: ServerCoreWeak,
 }
 
 type PeerRc = Rc<RefCell<Peer>>;
@@ -87,6 +87,7 @@ struct ServerCore {
 }
 
 type ServerCoreRc = Rc<RefCell<ServerCore>>;
+type ServerCoreWeak = Weak<RefCell<ServerCore>>;
 
 pub struct Server {
     // Interesting server data
@@ -195,7 +196,7 @@ impl PeerTimers {
 }
 
 impl Peer {
-    fn new(id: PeerId, addr: net::SocketAddr, server: ServerCoreRc) -> Self {
+    fn new(id: PeerId, addr: net::SocketAddr, server_weak: ServerCoreWeak) -> Self {
         Self {
             core: PeerCore {
                 id,
@@ -203,7 +204,7 @@ impl Peer {
                 timers: PeerTimers::new(),
             },
             endpoint: endpoint::Endpoint::new(),
-            server,
+            server_weak,
         }
     }
 }
@@ -249,7 +250,8 @@ impl PeerTable {
     ) -> Option<(PeerId, PeerRc)> {
         if self.addr_map.len() < self.array.len() && !self.addr_map.contains_key(addr) {
             let id = self.find_free_id();
-            let peer_rc = Rc::new(RefCell::new(Peer::new(id, addr.clone(), server_rc)));
+            let server_weak = Rc::downgrade(&server_rc);
+            let peer_rc = Rc::new(RefCell::new(Peer::new(id, addr.clone(), server_weak)));
 
             self.array[id as usize] = Some(Rc::clone(&peer_rc));
             self.addr_map.insert(addr.clone(), id);
@@ -275,7 +277,11 @@ impl PeerTable {
 
 impl<'a> EndpointContext<'a> {
     fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore, peer_rc: &'a PeerRc) -> Self {
-        Self { server, peer, peer_rc }
+        Self {
+            server,
+            peer,
+            peer_rc,
+        }
     }
 }
 
@@ -587,7 +593,12 @@ impl Server {
             .step_timer_wheel(&mut self.timer_data_expired);
 
         for timer_data in self.timer_data_expired.drain(..) {
-            handle_timer(&self.core, &timer_data.peer_rc, timer_data.timer_name, now_ms);
+            handle_timer(
+                &self.core,
+                &timer_data.peer_rc,
+                timer_data.timer_name,
+                now_ms,
+            );
         }
     }
 
@@ -715,21 +726,24 @@ impl PeerHandle {
     }
 
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        let server_rc = Rc::clone(&self.peer.borrow().server);
-
-        handle_send(&server_rc, &self.peer, packet_bytes, mode);
+        // (Do nothing if the server object has been dropped)
+        if let Some(server_rc) = Weak::upgrade(&self.peer.borrow().server_weak) {
+            handle_send(&server_rc, &self.peer, packet_bytes, mode);
+        }
     }
 
     pub fn flush(&mut self) {
-        let server_rc = Rc::clone(&self.peer.borrow().server);
-
-        handle_flush(&server_rc, &self.peer);
+        // (Do nothing if the server object has been dropped)
+        if let Some(server_rc) = Weak::upgrade(&self.peer.borrow().server_weak) {
+            handle_flush(&server_rc, &self.peer);
+        }
     }
 
     pub fn disconnect(&mut self) {
-        let server_rc = Rc::clone(&self.peer.borrow().server);
-
-        handle_disconnect(&server_rc, &self.peer);
+        // (Do nothing if the server object has been dropped)
+        if let Some(server_rc) = Weak::upgrade(&self.peer.borrow().server_weak) {
+            handle_disconnect(&server_rc, &self.peer);
+        }
     }
 
     pub fn id(&self) -> PeerId {
