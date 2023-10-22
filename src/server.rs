@@ -61,10 +61,10 @@ struct Peer {
 type PeerRc = Rc<RefCell<Peer>>;
 
 struct PeerTable {
-    // Array of peers indexed by ID
-    array: Vec<Option<PeerRc>>,
-    // Mapping from sender address to peer ID
-    addr_map: HashMap<net::SocketAddr, PeerId>,
+    // Mapping from sender address to peer
+    peers: HashMap<net::SocketAddr, PeerRc>,
+    // Stack of unused IDs
+    free_ids: Vec<PeerId>,
 }
 
 struct EndpointContext<'a> {
@@ -210,68 +210,46 @@ impl Peer {
 }
 
 impl PeerTable {
-    fn find_free_id(&self) -> PeerId {
-        let mut idx = 0;
-        for idx in 0..self.array.len() {
-            if self.array[idx].is_none() {
-                return idx as PeerId;
-            }
-        }
-        panic!("no free IDs");
-    }
-
     pub fn new(count_max: usize) -> Self {
-        let array = (0..count_max).map(|_| None).collect::<Vec<_>>();
-        let addr_map = HashMap::new();
+        debug_assert!(count_max > 0);
+        debug_assert!(count_max - 1 <= PeerId::max_value() as usize);
 
-        Self { array, addr_map }
+        let peers = HashMap::new();
+        let free_ids = (0..count_max)
+            .map(|i| (count_max - 1 - i) as PeerId)
+            .collect::<Vec<_>>();
+
+        Self { peers, free_ids }
     }
 
-    pub fn get_mut(&mut self, id: PeerId) -> Option<&mut PeerRc> {
-        if let Some(opt) = self.array.get_mut(id as usize) {
-            opt.as_mut()
-        } else {
-            None
-        }
+    pub fn find(&self, addr: &net::SocketAddr) -> Option<&PeerRc> {
+        self.peers.get(addr)
     }
 
-    pub fn find_mut(&mut self, addr: &net::SocketAddr) -> Option<&mut PeerRc> {
-        if let Some(&id) = self.addr_map.get(addr) {
-            self.get_mut(id)
-        } else {
-            None
+    pub fn insert(&mut self, addr: &net::SocketAddr, server_rc: &ServerCoreRc) -> Option<PeerRc> {
+        if let Some(new_id) = self.free_ids.pop() {
+            let server_weak = Rc::downgrade(server_rc);
+            let peer = Peer::new(new_id, addr.clone(), server_weak);
+            let peer_rc = Rc::new(RefCell::new(peer));
+
+            self.peers.insert(addr.clone(), Rc::clone(&peer_rc));
+
+            return Some(peer_rc);
         }
-    }
 
-    pub fn insert(
-        &mut self,
-        addr: &net::SocketAddr,
-        server_rc: ServerCoreRc,
-    ) -> Option<(PeerId, PeerRc)> {
-        if self.addr_map.len() < self.array.len() && !self.addr_map.contains_key(addr) {
-            let id = self.find_free_id();
-            let server_weak = Rc::downgrade(&server_rc);
-            let peer_rc = Rc::new(RefCell::new(Peer::new(id, addr.clone(), server_weak)));
-
-            self.array[id as usize] = Some(Rc::clone(&peer_rc));
-            self.addr_map.insert(addr.clone(), id);
-
-            return Some((id, peer_rc));
-        }
         return None;
     }
 
-    pub fn remove(&mut self, id: PeerId) {
-        if let Some(ref peer_rc) = self.array[id as usize] {
-            self.addr_map.remove(&peer_rc.borrow().core.addr);
-            self.array[id as usize] = None;
+    pub fn remove(&mut self, addr: &net::SocketAddr) {
+        if let Some(peer_rc) = self.peers.remove(addr) {
+            self.free_ids.push(peer_rc.borrow().core.id);
         } else {
-            panic!("double free");
+            println!("double free");
         }
     }
 
     pub fn count(&self) -> usize {
-        self.addr_map.len()
+        self.peers.len()
     }
 }
 
@@ -366,10 +344,9 @@ fn handle_handshake_beta(server_rc: &ServerCoreRc, sender_addr: &net::SocketAddr
 
     let now_ms = server.time_now_ms();
 
-    if let Some((new_peer_id, peer_rc)) = server_ref
-        .peer_table
-        .insert(sender_addr, Rc::clone(server_rc))
-    {
+    if let Some(peer_rc) = server_ref.peer_table.insert(sender_addr, server_rc) {
+        let new_peer_id = peer_rc.borrow().core.id;
+
         // Notify user of inbound connection
         let handle = PeerHandle::new(Rc::clone(&peer_rc));
         server_ref.events.push_back(Event::Connect(handle));
@@ -416,7 +393,7 @@ fn handle_connected_frame(server_rc: &ServerCoreRc, peer_rc: &PeerRc, frame_byte
         let handle = PeerHandle::new(Rc::clone(&peer_rc));
         server.events.push_back(Event::Disconnect(handle));
 
-        server.peer_table.remove(peer.core.id);
+        server.peer_table.remove(&peer.core.addr);
     }
 }
 
@@ -452,9 +429,9 @@ fn handle_frame(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net:
             let valid = true;
 
             if valid {
-                let mut server_ref = server_rc.borrow_mut();
+                let server_ref = server_rc.borrow();
 
-                if let Some(peer_rc) = server_ref.peer_table.find_mut(sender_addr) {
+                if let Some(peer_rc) = server_ref.peer_table.find(sender_addr) {
                     let peer_rc = Rc::clone(&peer_rc);
 
                     std::mem::drop(server_ref);
@@ -497,7 +474,7 @@ fn handle_timer(
         let handle = PeerHandle::new(Rc::clone(&peer_rc));
         server.events.push_back(Event::Disconnect(handle));
 
-        server.peer_table.remove(peer.core.id);
+        server.peer_table.remove(&peer.core.addr);
     }
 }
 
@@ -536,7 +513,7 @@ fn handle_flush(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
         let handle = PeerHandle::new(Rc::clone(&peer_rc));
         server.events.push_back(Event::Disconnect(handle));
 
-        server.peer_table.remove(peer.core.id);
+        server.peer_table.remove(&peer.core.addr);
     }
 }
 
@@ -562,7 +539,7 @@ fn handle_disconnect(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
         let handle = PeerHandle::new(Rc::clone(&peer_rc));
         server.events.push_back(Event::Disconnect(handle));
 
-        server.peer_table.remove(peer.core.id);
+        server.peer_table.remove(&peer.core.addr);
     }
 }
 
