@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::net;
 use std::rc::Rc;
@@ -16,6 +17,8 @@ struct SocketReceiver {
     poller_events: polling::Events,
 }
 
+type EndpointRc = Rc<RefCell<endpoint::Endpoint>>;
+
 enum HandshakePhase {
     Alpha,
     Beta,
@@ -29,7 +32,7 @@ struct HandshakeState {
 }
 
 struct ActiveState {
-    endpoint: endpoint::Endpoint,
+    endpoint_rc: EndpointRc,
 }
 
 enum State {
@@ -55,9 +58,7 @@ pub enum Event {
 }
 
 struct EndpointContext<'a> {
-    timers: &'a mut Timers,
-    socket: &'a net::UdpSocket,
-    events: &'a mut VecDeque<Event>,
+    client: &'a mut ClientCore,
 }
 
 pub struct ClientCore {
@@ -144,18 +145,24 @@ impl SocketReceiver {
     }
 }
 
+impl<'a> EndpointContext<'a> {
+    fn new(client: &'a mut ClientCore) -> Self {
+        Self { client }
+    }
+}
+
 impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn send(&mut self, frame_bytes: &[u8]) {
-        let _ = self.socket.send(frame_bytes);
+        let _ = self.client.socket.send(frame_bytes);
     }
 
     fn set_timer(&mut self, timer: endpoint::TimerName, time_ms: u64) {
         match timer {
             endpoint::TimerName::Rto => {
-                self.timers.rto_timer.timeout_ms = Some(time_ms);
+                self.client.timers.rto_timer.timeout_ms = Some(time_ms);
             }
             endpoint::TimerName::Receive => {
-                self.timers.recv_timer.timeout_ms = Some(time_ms);
+                self.client.timers.recv_timer.timeout_ms = Some(time_ms);
             }
         }
     }
@@ -163,34 +170,30 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn unset_timer(&mut self, timer: endpoint::TimerName) {
         match timer {
             endpoint::TimerName::Rto => {
-                self.timers.rto_timer.timeout_ms = None;
+                self.client.timers.rto_timer.timeout_ms = None;
             }
             endpoint::TimerName::Receive => {
-                self.timers.recv_timer.timeout_ms = None;
+                self.client.timers.recv_timer.timeout_ms = None;
             }
         }
     }
 
     fn on_connect(&mut self) {
-        self.events.push_back(Event::Connect);
+        self.client.events.push_back(Event::Connect);
     }
 
     fn on_disconnect(&mut self) {
-        self.events.push_back(Event::Disconnect);
-
-        todo!();
-        // self.state = State::Closed;
+        self.client.events.push_back(Event::Disconnect);
+        self.client.state = State::Closed;
     }
 
     fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
-        self.events.push_back(Event::Receive(packet_bytes))
+        self.client.events.push_back(Event::Receive(packet_bytes))
     }
 
     fn on_timeout(&mut self) {
-        self.events.push_back(Event::Timeout);
-
-        todo!();
-        // self.state = State::Closed;
+        self.client.events.push_back(Event::Timeout);
+        self.client.state = State::Closed;
     }
 }
 
@@ -209,8 +212,8 @@ impl ClientCore {
         let crc_valid = true;
 
         if crc_valid {
-            match &mut self.state {
-                State::Handshake(state) => match state.phase {
+            match self.state {
+                State::Handshake(ref mut state) => match state.phase {
                     HandshakePhase::Alpha => {
                         if frame_bytes == [0xA1] {
                             state.phase = HandshakePhase::Beta;
@@ -226,35 +229,37 @@ impl ClientCore {
                             self.timers.rto_timer.timeout_ms = None;
                             self.timers.recv_timer.timeout_ms = None;
 
-                            // Create an endpoint now that we're connected
-                            let ref mut host_ctx = EndpointContext {
-                                timers: &mut self.timers,
-                                socket: &self.socket,
-                                events: &mut self.events,
-                            };
+                            // Keep queued up packets to be sent later
+                            let packet_buffer = std::mem::take(&mut state.packet_buffer);
 
+                            // Create an endpoint now that we're connected
                             let mut endpoint = endpoint::Endpoint::new();
+                            let endpoint_rc = Rc::new(RefCell::new(endpoint));
+
+                            // Switch to active state
+                            self.state = State::Active(ActiveState {
+                                endpoint_rc: Rc::clone(&endpoint_rc),
+                            });
+
+                            // Initialize endpoint
+                            let mut endpoint = endpoint_rc.borrow_mut();
+
+                            let ref mut host_ctx = EndpointContext::new(self);
 
                             endpoint.init(now_ms, host_ctx);
 
-                            // Send queued up packets
-                            for (packet, mode) in state.packet_buffer.drain(..) {
+                            for (packet, mode) in packet_buffer.into_iter() {
                                 endpoint.send(packet, mode, host_ctx);
                             }
-
-                            // Switch to active state
-                            self.state = State::Active(ActiveState { endpoint });
                         }
                     }
                 },
-                State::Active(state) => {
-                    let ref mut host_ctx = EndpointContext {
-                        timers: &mut self.timers,
-                        socket: &self.socket,
-                        events: &mut self.events,
-                    };
+                State::Active(ref mut state) => {
+                    let endpoint_rc = Rc::clone(&state.endpoint_rc);
 
-                    state.endpoint.handle_frame(frame_bytes, host_ctx);
+                    let ref mut host_ctx = EndpointContext::new(self);
+
+                    endpoint_rc.borrow_mut().handle_frame(frame_bytes, host_ctx);
                 }
                 State::Closed => {}
             }
@@ -316,13 +321,13 @@ impl ClientCore {
                 }
             }
             State::Active(state) => {
-                let ref mut host_ctx = EndpointContext {
-                    timers: &mut self.timers,
-                    socket: &self.socket,
-                    events: &mut self.events,
-                };
+                let endpoint_rc = Rc::clone(&state.endpoint_rc);
 
-                state.endpoint.handle_timer(timer_id, now_ms, host_ctx);
+                let ref mut host_ctx = EndpointContext::new(self);
+
+                endpoint_rc
+                    .borrow_mut()
+                    .handle_timer(timer_id, now_ms, host_ctx);
             }
             State::Closed => {}
         }
@@ -355,13 +360,11 @@ impl ClientCore {
                 state.packet_buffer.push((packet_bytes, mode));
             }
             State::Active(state) => {
-                let ref mut host_ctx = EndpointContext {
-                    timers: &mut self.timers,
-                    socket: &self.socket,
-                    events: &mut self.events,
-                };
+                let endpoint_rc = Rc::clone(&state.endpoint_rc);
 
-                state.endpoint.send(packet_bytes, mode, host_ctx);
+                let ref mut host_ctx = EndpointContext::new(self);
+
+                endpoint_rc.borrow_mut().send(packet_bytes, mode, host_ctx);
             }
             State::Closed => {}
         }
@@ -371,13 +374,11 @@ impl ClientCore {
         match &mut self.state {
             State::Handshake(_) => {}
             State::Active(state) => {
-                let ref mut host_ctx = EndpointContext {
-                    timers: &mut self.timers,
-                    socket: &self.socket,
-                    events: &mut self.events,
-                };
+                let endpoint_rc = Rc::clone(&state.endpoint_rc);
 
-                state.endpoint.flush(host_ctx);
+                let ref mut host_ctx = EndpointContext::new(self);
+
+                endpoint_rc.borrow_mut().flush(host_ctx);
             }
             State::Closed => {}
         }
