@@ -78,10 +78,6 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
         let _ = self.socket.send(frame_bytes);
     }
 
-    fn receive(&mut self, packet_bytes: Box<[u8]>) {
-        self.events.push_back(Event::Receive(packet_bytes))
-    }
-
     fn set_timer(&mut self, timer: endpoint::TimerName, time_ms: u64) {
         match timer {
             endpoint::TimerName::Rto => {
@@ -104,18 +100,22 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
         }
     }
 
-    fn connect(&mut self) {
+    fn on_connect(&mut self) {
         self.events.push_back(Event::Connect);
     }
 
-    fn disconnect(&mut self) {
+    fn on_disconnect(&mut self) {
         self.events.push_back(Event::Disconnect);
 
         todo!();
         // self.state = State::Closed;
     }
 
-    fn timeout(&mut self) {
+    fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
+        self.events.push_back(Event::Receive(packet_bytes))
+    }
+
+    fn on_timeout(&mut self) {
         self.events.push_back(Event::Timeout);
 
         todo!();

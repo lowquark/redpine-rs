@@ -275,13 +275,6 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         let _ = self.server.socket.send_to(frame_bytes, &self.peer.addr);
     }
 
-    fn receive(&mut self, packet_bytes: Box<[u8]>) {
-        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
-        self.server
-            .events
-            .push_back(Event::Receive(handle, packet_bytes));
-    }
-
     fn set_timer(&mut self, name: endpoint::TimerName, time_ms: u64) {
         let timer_id = self.peer.timers.get_mut(name);
 
@@ -306,21 +299,30 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         }
     }
 
-    fn connect(&mut self) {
+    fn on_connect(&mut self) {
         let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
-        self.server.events.push_back(Event::Connect(handle));
+        let event = Event::Connect(handle);
+        self.server.events.push_back(event);
     }
 
-    fn disconnect(&mut self) {
+    fn on_disconnect(&mut self) {
         let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
-        self.server.events.push_back(Event::Disconnect(handle));
+        let event = Event::Disconnect(handle);
+        self.server.events.push_back(event);
 
         self.server.peer_table.remove(&self.peer.addr);
     }
 
-    fn timeout(&mut self) {
+    fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
         let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
-        self.server.events.push_back(Event::Timeout(handle));
+        let event = Event::Receive(handle, packet_bytes);
+        self.server.events.push_back(event);
+    }
+
+    fn on_timeout(&mut self) {
+        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
+        let event = Event::Timeout(handle);
+        self.server.events.push_back(event);
 
         self.server.peer_table.remove(&self.peer.addr);
     }

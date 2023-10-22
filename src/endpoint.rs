@@ -10,15 +10,26 @@ pub enum TimerName {
 }
 
 pub trait HostContext {
+    // Called to send a frame to the remote host.
     fn send(&mut self, frame_bytes: &[u8]);
-    fn receive(&mut self, packet_bytes: Box<[u8]>);
 
+    // Called to set the given timer
     fn set_timer(&mut self, timer: TimerName, time_ms: u64);
+
+    // Called to unset the given timer
     fn unset_timer(&mut self, timer: TimerName);
 
-    fn connect(&mut self);
-    fn disconnect(&mut self);
-    fn timeout(&mut self);
+    // Called when the connection has been successfully initialized
+    fn on_connect(&mut self);
+
+    // Called when the connection has been terminated gracefully
+    fn on_disconnect(&mut self);
+
+    // Called when a packet has been received from the remote host
+    fn on_receive(&mut self, packet_bytes: Box<[u8]>);
+
+    // Called when the connection has been terminated due to a timeout
+    fn on_timeout(&mut self);
 }
 
 struct FrameTxWindow {
@@ -263,7 +274,7 @@ impl Endpoint {
     where
         C: HostContext,
     {
-        ctx.connect();
+        ctx.on_connect();
 
         // Set a dummy timer, just for fun
         ctx.set_timer(TimerName::Rto, now_ms + 500);
@@ -548,27 +559,27 @@ mod tests {
             println!("send {:02X?}", frame_bytes);
         }
 
-        fn receive(&mut self, packet_bytes: Box<[u8]>) {
-            println!("receive {:02X?}", packet_bytes);
-        }
-
         fn set_timer(&mut self, timer: TimerName, time_ms: u64) {
-            println!("Set timer!");
+            println!("set timer {:?} for {}", timer, time_ms);
         }
 
         fn unset_timer(&mut self, timer: TimerName) {
-            println!("Unset timer!");
+            println!("unset timer {:?}", timer);
         }
 
-        fn connect(&mut self) {
+        fn on_connect(&mut self) {
             println!("connect");
         }
 
-        fn disconnect(&mut self) {
+        fn on_disconnect(&mut self) {
             println!("disconnect");
         }
 
-        fn timeout(&mut self) {
+        fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
+            println!("receive {:02X?}", packet_bytes);
+        }
+
+        fn on_timeout(&mut self) {
             println!("disconnect");
         }
     }
