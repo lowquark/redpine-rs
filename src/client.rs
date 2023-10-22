@@ -1,14 +1,20 @@
 use std::collections::VecDeque;
 use std::net;
+use std::rc::Rc;
 use std::time;
 
 use super::endpoint;
 use super::SendMode;
 
-const SOCKET_POLLING_KEY: usize = 0;
-
-const SYN_TIMEOUT_MS: u64 = 2000;
-const HANDSHAKE_TIMEOUT_MS: u64 = 10000;
+struct SocketReceiver {
+    // Reference to non-blocking, connected, server socket
+    socket: Rc<net::UdpSocket>,
+    // Always-allocated receive buffer
+    recv_buffer: Box<[u8]>,
+    // Polling objects
+    poller: polling::Poller,
+    poller_events: polling::Events,
+}
 
 enum HandshakePhase {
     Alpha,
@@ -37,14 +43,8 @@ struct Timer {
 }
 
 struct Timers {
-    rto_timer: Timer,  // No response from remote
-    recv_timer: Timer, // When to skip a hole in the reorder buffer
-}
-
-struct HostContext<'a> {
-    timers: &'a mut Timers,
-    socket: &'a net::UdpSocket,
-    events: &'a mut VecDeque<Event>,
+    rto_timer: Timer,
+    recv_timer: Timer,
 }
 
 pub enum Event {
@@ -54,26 +54,97 @@ pub enum Event {
     Timeout,
 }
 
-pub struct Client {
-    socket: net::UdpSocket,
-    local_addr: net::SocketAddr,
-    peer_addr: net::SocketAddr,
-
-    poller: polling::Poller,
-    poller_events: polling::Events,
-
-    recv_buffer: Box<[u8]>,
-
-    events: VecDeque<Event>,
-
-    timers: Timers,
-
-    time_ref: time::Instant,
-
-    state: State,
+struct EndpointContext<'a> {
+    timers: &'a mut Timers,
+    socket: &'a net::UdpSocket,
+    events: &'a mut VecDeque<Event>,
 }
 
-impl<'a> endpoint::HostContext for HostContext<'a> {
+pub struct ClientCore {
+    // Timestamps are computed relative to this instant
+    time_ref: time::Instant,
+    // Client socket
+    socket: Rc<net::UdpSocket>,
+    // Current mode of operation
+    state: State,
+    // Pending timer events
+    timers: Timers,
+    // Queue of events
+    events: VecDeque<Event>,
+}
+
+pub struct Client {
+    // Interesting client data
+    core: ClientCore,
+    // Permits both blocking and non-blocking reads from a non-blocking socket
+    receiver: SocketReceiver,
+    // Cached from socket initialization
+    local_addr: net::SocketAddr,
+    peer_addr: net::SocketAddr,
+}
+
+const SOCKET_POLLING_KEY: usize = 0;
+
+const SYN_TIMEOUT_MS: u64 = 2000;
+const HANDSHAKE_TIMEOUT_MS: u64 = 10000;
+
+impl SocketReceiver {
+    fn new(socket: Rc<net::UdpSocket>, frame_size_max: usize) -> std::io::Result<Self> {
+        let poller = polling::Poller::new()?;
+
+        unsafe {
+            poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
+        }
+
+        Ok(Self {
+            socket,
+            recv_buffer: vec![0; frame_size_max].into_boxed_slice(),
+            poller,
+            poller_events: polling::Events::new(),
+        })
+    }
+
+    /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
+    /// otherwise.
+    pub fn try_read_frame<'a>(&'a mut self) -> std::io::Result<Option<&'a [u8]>> {
+        match self.socket.recv(&mut self.recv_buffer) {
+            Ok(frame_len) => {
+                let ref frame_bytes = self.recv_buffer[..frame_len];
+                Ok(Some(frame_bytes))
+            }
+            Err(err) => match err.kind() {
+                // The only acceptable error is WouldBlock, indicating no packet
+                std::io::ErrorKind::WouldBlock => Ok(None),
+                _ => Err(err),
+            },
+        }
+    }
+
+    /// Blocks for a duration of up to `timeout` for an incoming frame and returns it. Returns
+    /// Ok(None) if no frame could be read in the alloted time, or if polling awoke spuriously.
+    pub fn wait_for_frame<'a>(
+        &'a mut self,
+        timeout: Option<time::Duration>,
+    ) -> std::io::Result<Option<&'a [u8]>> {
+        // Wait for a readable event (must be done prior to each wait() call)
+        // TODO: Does this work if the socket is already readable?
+        self.poller
+            .modify(&*self.socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
+
+        self.poller_events.clear();
+
+        let n = self.poller.wait(&mut self.poller_events, timeout)?;
+
+        if n > 0 {
+            // The socket is readable - read in confidence
+            self.try_read_frame()
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn send(&mut self, frame_bytes: &[u8]) {
         let _ = self.socket.send(frame_bytes);
     }
@@ -123,52 +194,14 @@ impl<'a> endpoint::HostContext for HostContext<'a> {
     }
 }
 
-impl Client {
+impl ClientCore {
     /// Returns the number of whole milliseconds elapsed since the client object was created.
     fn time_now_ms(&self) -> u64 {
         (time::Instant::now() - self.time_ref).as_millis() as u64
     }
 
-    /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
-    /// otherwise.
-    fn try_read_frame(&mut self) -> std::io::Result<Option<usize>> {
-        match self.socket.recv(&mut self.recv_buffer) {
-            Ok(frame_len) => Ok(Some(frame_len)),
-            Err(err) => match err.kind() {
-                // The only acceptable error is WouldBlock, indicating no packet
-                std::io::ErrorKind::WouldBlock => Ok(None),
-                _ => Err(err),
-            },
-        }
-    }
-
-    /// Blocks for a duration of up to `timeout` for an incoming frame and returns it. Returns
-    /// Ok(None) if no frame could be read in the alloted time, or if polling awoke spuriously.
-    fn wait_for_frame(
-        &mut self,
-        timeout: Option<time::Duration>,
-    ) -> std::io::Result<Option<usize>> {
-        // Wait for a readable event (must be done prior to each wait() call)
-        // TODO: Does this work if the socket is already readable?
-        self.poller
-            .modify(&self.socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
-
-        self.poller_events.clear();
-
-        let n = self.poller.wait(&mut self.poller_events, timeout)?;
-
-        if n > 0 {
-            // The socket is readable - read in confidence
-            self.try_read_frame()
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn process_frame(&mut self, frame_size: usize) {
+    pub fn process_frame(&mut self, frame_bytes: &[u8]) {
         let now_ms = self.time_now_ms();
-
-        let frame_bytes = &self.recv_buffer[..frame_size];
 
         println!("received a packet of length {}", frame_bytes.len());
         println!("{:02X?}", frame_bytes);
@@ -194,7 +227,7 @@ impl Client {
                             self.timers.recv_timer.timeout_ms = None;
 
                             // Create an endpoint now that we're connected
-                            let ref mut host_ctx = HostContext {
+                            let ref mut host_ctx = EndpointContext {
                                 timers: &mut self.timers,
                                 socket: &self.socket,
                                 events: &mut self.events,
@@ -215,7 +248,7 @@ impl Client {
                     }
                 },
                 State::Active(state) => {
-                    let ref mut host_ctx = HostContext {
+                    let ref mut host_ctx = EndpointContext {
                         timers: &mut self.timers,
                         socket: &self.socket,
                         events: &mut self.events,
@@ -230,27 +263,8 @@ impl Client {
         }
     }
 
-    /// Reads and processes as many frames as possible from the socket without blocking.
-    fn process_available_frames(&mut self) {
-        while let Ok(Some(frame_size)) = self.try_read_frame() {
-            // Process this frame
-            self.process_frame(frame_size);
-        }
-    }
-
-    /// Reads and processes as many frames as possible from the socket, waiting up to
-    /// `wait_timeout` for the first.
-    fn process_available_frames_wait(&mut self, wait_timeout: Option<time::Duration>) {
-        if let Ok(Some(frame_size)) = self.wait_for_frame(wait_timeout) {
-            // Process this frame
-            self.process_frame(frame_size);
-            // Process any further frames without blocking
-            return self.process_available_frames();
-        }
-    }
-
     /// Returns the time remaining until the next timer expires.
-    fn next_timer_timeout(&self) -> Option<time::Duration> {
+    pub fn next_timer_timeout(&self) -> Option<time::Duration> {
         let now_ms = self.time_now_ms();
 
         let mut timeout_ms = None;
@@ -302,7 +316,7 @@ impl Client {
                 }
             }
             State::Active(state) => {
-                let ref mut host_ctx = HostContext {
+                let ref mut host_ctx = EndpointContext {
                     timers: &mut self.timers,
                     socket: &self.socket,
                     events: &mut self.events,
@@ -314,7 +328,7 @@ impl Client {
         }
     }
 
-    fn process_timeouts(&mut self) {
+    pub fn process_timeouts(&mut self) {
         let now_ms = self.time_now_ms();
 
         let timer_ids = [endpoint::TimerName::Rto, endpoint::TimerName::Receive];
@@ -335,6 +349,61 @@ impl Client {
         }
     }
 
+    pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+        match &mut self.state {
+            State::Handshake(state) => {
+                state.packet_buffer.push((packet_bytes, mode));
+            }
+            State::Active(state) => {
+                let ref mut host_ctx = EndpointContext {
+                    timers: &mut self.timers,
+                    socket: &self.socket,
+                    events: &mut self.events,
+                };
+
+                state.endpoint.send(packet_bytes, mode, host_ctx);
+            }
+            State::Closed => {}
+        }
+    }
+
+    pub fn flush(&mut self) {
+        match &mut self.state {
+            State::Handshake(_) => {}
+            State::Active(state) => {
+                let ref mut host_ctx = EndpointContext {
+                    timers: &mut self.timers,
+                    socket: &self.socket,
+                    events: &mut self.events,
+                };
+
+                state.endpoint.flush(host_ctx);
+            }
+            State::Closed => {}
+        }
+    }
+}
+
+impl Client {
+    /// Reads and processes as many frames as possible from the socket without blocking.
+    fn process_available_frames(&mut self) {
+        while let Ok(Some(frame_bytes)) = self.receiver.try_read_frame() {
+            // Process this frame
+            self.core.process_frame(frame_bytes);
+        }
+    }
+
+    /// Reads and processes as many frames as possible from the socket, waiting up to
+    /// `wait_timeout` for the first.
+    fn process_available_frames_wait(&mut self, wait_timeout: Option<time::Duration>) {
+        if let Ok(Some(frame_bytes)) = self.receiver.wait_for_frame(wait_timeout) {
+            // Process this frame
+            self.core.process_frame(frame_bytes);
+            // Process any further frames without blocking
+            return self.process_available_frames();
+        }
+    }
+
     pub fn connect<A>(server_addr: A) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
@@ -350,42 +419,34 @@ impl Client {
         let local_addr = socket.local_addr()?;
         let peer_addr = socket.peer_addr()?;
 
-        let poller = polling::Poller::new()?;
-
-        unsafe {
-            poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
-        }
-
         println!("requesting phase α...");
         let _ = socket.send(&[0xA0]);
 
+        let socket_rc = Rc::new(socket);
+
+        let receiver = SocketReceiver::new(Rc::clone(&socket_rc), frame_size_max)?;
+
         Ok(Self {
-            socket,
+            core: ClientCore {
+                time_ref: time::Instant::now(),
+                socket: Rc::clone(&socket_rc),
+                state: State::Handshake(HandshakeState {
+                    phase: HandshakePhase::Alpha,
+                    timeout_time_ms: HANDSHAKE_TIMEOUT_MS,
+                    timeout_ms: HANDSHAKE_TIMEOUT_MS,
+                    packet_buffer: Vec::new(),
+                }),
+                timers: Timers {
+                    rto_timer: Timer {
+                        timeout_ms: Some(SYN_TIMEOUT_MS),
+                    },
+                    recv_timer: Timer { timeout_ms: None },
+                },
+                events: VecDeque::new(),
+            },
+            receiver,
             local_addr,
             peer_addr,
-
-            poller,
-            poller_events: polling::Events::new(),
-
-            recv_buffer: vec![0; frame_size_max].into_boxed_slice(),
-
-            events: VecDeque::new(),
-
-            timers: Timers {
-                rto_timer: Timer {
-                    timeout_ms: Some(SYN_TIMEOUT_MS),
-                },
-                recv_timer: Timer { timeout_ms: None },
-            },
-
-            time_ref: time::Instant::now(),
-
-            state: State::Handshake(HandshakeState {
-                phase: HandshakePhase::Alpha,
-                timeout_time_ms: HANDSHAKE_TIMEOUT_MS,
-                timeout_ms: HANDSHAKE_TIMEOUT_MS,
-                packet_buffer: Vec::new(),
-            }),
         })
     }
 
@@ -395,26 +456,26 @@ impl Client {
     /// Returns `None` if no events are available, or if an error was encountered while reading
     /// from the internal socket.
     pub fn poll_event(&mut self) -> Option<Event> {
-        if self.events.is_empty() {
+        if self.core.events.is_empty() {
             self.process_available_frames();
 
-            self.process_timeouts();
+            self.core.process_timeouts();
         }
 
-        return self.events.pop_front();
+        return self.core.events.pop_front();
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned.
     pub fn wait_event(&mut self) -> Event {
         loop {
-            let wait_timeout = self.next_timer_timeout();
+            let wait_timeout = self.core.next_timer_timeout();
 
             self.process_available_frames_wait(wait_timeout);
 
-            self.process_timeouts();
+            self.core.process_timeouts();
 
-            if let Some(event) = self.events.pop_front() {
+            if let Some(event) = self.core.events.pop_front() {
                 return event;
             }
         }
@@ -426,12 +487,12 @@ impl Client {
     ///
     /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
-        if self.events.is_empty() {
+        if self.core.events.is_empty() {
             let mut remaining_timeout = timeout;
             let mut wait_begin = time::Instant::now();
 
             loop {
-                let wait_timeout = if let Some(timer_timeout) = self.next_timer_timeout() {
+                let wait_timeout = if let Some(timer_timeout) = self.core.next_timer_timeout() {
                     remaining_timeout.min(timer_timeout)
                 } else {
                     remaining_timeout
@@ -439,9 +500,9 @@ impl Client {
 
                 self.process_available_frames_wait(Some(wait_timeout));
 
-                self.process_timeouts();
+                self.core.process_timeouts();
 
-                if !self.events.is_empty() {
+                if !self.core.events.is_empty() {
                     // Found what we're looking for
                     break;
                 }
@@ -459,44 +520,22 @@ impl Client {
             }
         }
 
-        return self.events.pop_front();
+        return self.core.events.pop_front();
+    }
+
+    pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+        self.core.send(packet_bytes, mode);
+    }
+
+    pub fn flush(&mut self) {
+        self.core.flush();
     }
 
     pub fn local_addr(&self) -> net::SocketAddr {
         self.local_addr
     }
 
-    pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        match &mut self.state {
-            State::Handshake(state) => {
-                state.packet_buffer.push((packet_bytes, mode));
-            }
-            State::Active(state) => {
-                let ref mut host_ctx = HostContext {
-                    timers: &mut self.timers,
-                    socket: &self.socket,
-                    events: &mut self.events,
-                };
-
-                state.endpoint.send(packet_bytes, mode, host_ctx);
-            }
-            State::Closed => {}
-        }
-    }
-
-    pub fn flush(&mut self) {
-        match &mut self.state {
-            State::Handshake(_) => {}
-            State::Active(state) => {
-                let ref mut host_ctx = HostContext {
-                    timers: &mut self.timers,
-                    socket: &self.socket,
-                    events: &mut self.events,
-                };
-
-                state.endpoint.flush(host_ctx);
-            }
-            State::Closed => {}
-        }
+    pub fn server_addr(&self) -> net::SocketAddr {
+        self.peer_addr
     }
 }

@@ -5,7 +5,9 @@ use super::SendMode;
 
 #[derive(Clone, Copy, Debug)]
 pub enum TimerName {
+    // Resend time out (no ack from remote)
     Rto,
+    // When to skip a hole in the reorder buffer
     Receive,
 }
 

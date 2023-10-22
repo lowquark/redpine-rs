@@ -21,19 +21,10 @@ struct SocketReceiver {
 
 type PeerId = u32;
 
-pub enum Event {
-    Connect(PeerHandle),
-    Disconnect(PeerHandle),
-    Receive(PeerHandle, Box<[u8]>),
-    Timeout(PeerHandle),
-}
-
 struct PeerTimerData {
     peer_rc: PeerRc,
     timer_name: endpoint::TimerName,
 }
-
-type TimerWheel = timer_wheel::TimerWheel<PeerTimerData>;
 
 struct PeerTimers {
     rto_timer_id: Option<timer_wheel::TimerId>,
@@ -65,6 +56,15 @@ struct PeerTable {
     peers: HashMap<net::SocketAddr, PeerRc>,
     // Stack of unused IDs
     free_ids: Vec<PeerId>,
+}
+
+type TimerWheel = timer_wheel::TimerWheel<PeerTimerData>;
+
+pub enum Event {
+    Connect(PeerHandle),
+    Disconnect(PeerHandle),
+    Receive(PeerHandle, Box<[u8]>),
+    Timeout(PeerHandle),
 }
 
 struct EndpointContext<'a> {
