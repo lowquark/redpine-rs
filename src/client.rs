@@ -153,6 +153,7 @@ impl<'a> EndpointContext<'a> {
 
 impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn send_frame(&mut self, frame_bytes: &[u8]) {
+        println!(" <- {:02X?}", frame_bytes);
         let _ = self.client.socket.send(frame_bytes);
     }
 
@@ -206,8 +207,7 @@ impl ClientCore {
     pub fn process_frame(&mut self, frame_bytes: &[u8]) {
         let now_ms = self.time_now_ms();
 
-        println!("received a packet of length {}", frame_bytes.len());
-        println!("{:02X?}", frame_bytes);
+        println!(" -> {:02X?}", frame_bytes);
 
         let crc_valid = true;
 

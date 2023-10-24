@@ -276,7 +276,7 @@ impl<'a> EndpointContext<'a> {
 
 impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn send_frame(&mut self, frame_bytes: &[u8]) {
-        println!("sending frame to {:?}!", self.peer.addr);
+        println!("{:?} <- {:02X?}", self.peer.addr, frame_bytes);
         let _ = self.server.socket.send_to(frame_bytes, &self.peer.addr);
     }
 
@@ -434,12 +434,7 @@ impl ServerCore {
     }
 
     fn handle_frame(&mut self, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
-        println!(
-            "received a packet of length {} from {:?}",
-            frame_bytes.len(),
-            sender_addr
-        );
-        println!("{:02X?}", frame_bytes);
+        println!("{:?} -> {:02X?}", sender_addr, frame_bytes);
 
         let crc_valid = true;
 
