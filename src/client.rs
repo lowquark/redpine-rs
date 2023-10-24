@@ -61,7 +61,7 @@ struct EndpointContext<'a> {
     client: &'a mut ClientCore,
 }
 
-pub struct ClientCore {
+struct ClientCore {
     // Timestamps are computed relative to this instant
     time_ref: time::Instant,
     // Client socket
@@ -204,70 +204,6 @@ impl ClientCore {
         (time::Instant::now() - self.time_ref).as_millis() as u64
     }
 
-    pub fn process_frame(&mut self, frame_bytes: &[u8]) {
-        let now_ms = self.time_now_ms();
-
-        println!(" -> {:02X?}", frame_bytes);
-
-        let crc_valid = true;
-
-        if crc_valid {
-            match self.state {
-                State::Handshake(ref mut state) => match state.phase {
-                    HandshakePhase::Alpha => {
-                        if frame_bytes == [0xA1] {
-                            state.phase = HandshakePhase::Beta;
-                            state.timeout_time_ms = now_ms + state.timeout_ms;
-
-                            println!("requesting phase β...");
-                            let _ = self.socket.send(&[0xB0]);
-                        }
-                    }
-                    HandshakePhase::Beta => {
-                        if frame_bytes == [0xB1] {
-                            // Reset any previous timers
-                            self.timers.rto_timer.timeout_ms = None;
-                            self.timers.recv_timer.timeout_ms = None;
-
-                            // Keep queued up packets to be sent later
-                            let packet_buffer = std::mem::take(&mut state.packet_buffer);
-
-                            // Create an endpoint now that we're connected
-                            let mut endpoint = endpoint::Endpoint::new();
-                            let endpoint_rc = Rc::new(RefCell::new(endpoint));
-
-                            // Switch to active state
-                            self.state = State::Active(ActiveState {
-                                endpoint_rc: Rc::clone(&endpoint_rc),
-                            });
-
-                            // Initialize endpoint
-                            let mut endpoint = endpoint_rc.borrow_mut();
-
-                            let ref mut host_ctx = EndpointContext::new(self);
-
-                            endpoint.init(now_ms, host_ctx);
-
-                            for (packet, mode) in packet_buffer.into_iter() {
-                                endpoint.send(packet, mode, host_ctx);
-                            }
-                        }
-                    }
-                },
-                State::Active(ref mut state) => {
-                    let endpoint_rc = Rc::clone(&state.endpoint_rc);
-
-                    let ref mut host_ctx = EndpointContext::new(self);
-
-                    endpoint_rc.borrow_mut().handle_frame(frame_bytes, host_ctx);
-                }
-                State::Closed => {}
-            }
-        } else {
-            // We don't negotiate with entropy
-        }
-    }
-
     /// Returns the time remaining until the next timer expires.
     pub fn next_timer_timeout(&self) -> Option<time::Duration> {
         let now_ms = self.time_now_ms();
@@ -354,6 +290,93 @@ impl ClientCore {
         }
     }
 
+    fn handle_frame(&mut self, frame_bytes: &[u8]) {
+        let now_ms = self.time_now_ms();
+
+        println!(" -> {:02X?}", frame_bytes);
+
+        let crc_valid = true;
+
+        if crc_valid {
+            match self.state {
+                State::Handshake(ref mut state) => match state.phase {
+                    HandshakePhase::Alpha => {
+                        if frame_bytes == [0xA1] {
+                            state.phase = HandshakePhase::Beta;
+                            state.timeout_time_ms = now_ms + state.timeout_ms;
+
+                            println!("requesting phase β...");
+                            let _ = self.socket.send(&[0xB0]);
+                        }
+                    }
+                    HandshakePhase::Beta => {
+                        if frame_bytes == [0xB1] {
+                            // Reset any previous timers
+                            self.timers.rto_timer.timeout_ms = None;
+                            self.timers.recv_timer.timeout_ms = None;
+
+                            // Keep queued up packets to be sent later
+                            let packet_buffer = std::mem::take(&mut state.packet_buffer);
+
+                            // Create an endpoint now that we're connected
+                            let mut endpoint = endpoint::Endpoint::new();
+                            let endpoint_rc = Rc::new(RefCell::new(endpoint));
+
+                            // Switch to active state
+                            self.state = State::Active(ActiveState {
+                                endpoint_rc: Rc::clone(&endpoint_rc),
+                            });
+
+                            // Initialize endpoint
+                            let mut endpoint = endpoint_rc.borrow_mut();
+
+                            let ref mut host_ctx = EndpointContext::new(self);
+
+                            endpoint.init(now_ms, host_ctx);
+
+                            for (packet, mode) in packet_buffer.into_iter() {
+                                endpoint.send(packet, mode, host_ctx);
+                            }
+                        }
+                    }
+                },
+                State::Active(ref mut state) => {
+                    let endpoint_rc = Rc::clone(&state.endpoint_rc);
+
+                    let ref mut host_ctx = EndpointContext::new(self);
+
+                    endpoint_rc.borrow_mut().handle_frame(frame_bytes, host_ctx);
+                }
+                State::Closed => {}
+            }
+        } else {
+            // We don't negotiate with entropy
+        }
+    }
+
+    /// Reads and processes as many frames as possible from receiver without blocking.
+    pub fn handle_frames(&mut self, receiver: &mut SocketReceiver) {
+        while let Ok(Some(frame_bytes)) = receiver.try_read_frame() {
+            // Process this frame
+            self.handle_frame(frame_bytes);
+        }
+    }
+
+    /// Reads and processes as many frames as possible from receiver, waiting up to
+    /// `wait_timeout` for the first.
+    pub fn handle_frames_wait(
+        &mut self,
+        receiver: &mut SocketReceiver,
+        wait_timeout: Option<time::Duration>,
+    ) {
+        if let Ok(Some(frame_bytes)) = receiver.wait_for_frame(wait_timeout) {
+            // Process this frame
+            self.handle_frame(frame_bytes);
+            // Process any further frames without blocking
+            return self.handle_frames(receiver);
+        }
+    }
+
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
         match &mut self.state {
             State::Handshake(state) => {
@@ -386,25 +409,6 @@ impl ClientCore {
 }
 
 impl Client {
-    /// Reads and processes as many frames as possible from the socket without blocking.
-    fn process_available_frames(&mut self) {
-        while let Ok(Some(frame_bytes)) = self.receiver.try_read_frame() {
-            // Process this frame
-            self.core.process_frame(frame_bytes);
-        }
-    }
-
-    /// Reads and processes as many frames as possible from the socket, waiting up to
-    /// `wait_timeout` for the first.
-    fn process_available_frames_wait(&mut self, wait_timeout: Option<time::Duration>) {
-        if let Ok(Some(frame_bytes)) = self.receiver.wait_for_frame(wait_timeout) {
-            // Process this frame
-            self.core.process_frame(frame_bytes);
-            // Process any further frames without blocking
-            return self.process_available_frames();
-        }
-    }
-
     pub fn connect<A>(server_addr: A) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
@@ -457,26 +461,30 @@ impl Client {
     /// Returns `None` if no events are available, or if an error was encountered while reading
     /// from the internal socket.
     pub fn poll_event(&mut self) -> Option<Event> {
-        if self.core.events.is_empty() {
-            self.process_available_frames();
+        let ref mut core = self.core;
 
-            self.core.process_timeouts();
+        if core.events.is_empty() {
+            core.handle_frames(&mut self.receiver);
+
+            core.process_timeouts();
         }
 
-        return self.core.events.pop_front();
+        return core.events.pop_front();
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned.
     pub fn wait_event(&mut self) -> Event {
+        let ref mut core = self.core;
+
         loop {
-            let wait_timeout = self.core.next_timer_timeout();
+            let wait_timeout = core.next_timer_timeout();
 
-            self.process_available_frames_wait(wait_timeout);
+            core.handle_frames_wait(&mut self.receiver, wait_timeout);
 
-            self.core.process_timeouts();
+            core.process_timeouts();
 
-            if let Some(event) = self.core.events.pop_front() {
+            if let Some(event) = core.events.pop_front() {
                 return event;
             }
         }
@@ -488,22 +496,24 @@ impl Client {
     ///
     /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
-        if self.core.events.is_empty() {
+        let ref mut core = self.core;
+
+        if core.events.is_empty() {
             let mut remaining_timeout = timeout;
             let mut wait_begin = time::Instant::now();
 
             loop {
-                let wait_timeout = if let Some(timer_timeout) = self.core.next_timer_timeout() {
+                let wait_timeout = if let Some(timer_timeout) = core.next_timer_timeout() {
                     remaining_timeout.min(timer_timeout)
                 } else {
                     remaining_timeout
                 };
 
-                self.process_available_frames_wait(Some(wait_timeout));
+                core.handle_frames_wait(&mut self.receiver, Some(wait_timeout));
 
-                self.core.process_timeouts();
+                core.process_timeouts();
 
-                if !self.core.events.is_empty() {
+                if !core.events.is_empty() {
                     // Found what we're looking for
                     break;
                 }
@@ -521,7 +531,7 @@ impl Client {
             }
         }
 
-        return self.core.events.pop_front();
+        return core.events.pop_front();
     }
 
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
