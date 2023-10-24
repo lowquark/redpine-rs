@@ -152,7 +152,7 @@ impl<'a> EndpointContext<'a> {
 }
 
 impl<'a> endpoint::HostContext for EndpointContext<'a> {
-    fn send(&mut self, frame_bytes: &[u8]) {
+    fn send_frame(&mut self, frame_bytes: &[u8]) {
         let _ = self.client.socket.send(frame_bytes);
     }
 

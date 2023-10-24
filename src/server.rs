@@ -275,7 +275,7 @@ impl<'a> EndpointContext<'a> {
 }
 
 impl<'a> endpoint::HostContext for EndpointContext<'a> {
-    fn send(&mut self, frame_bytes: &[u8]) {
+    fn send_frame(&mut self, frame_bytes: &[u8]) {
         println!("sending frame to {:?}!", self.peer.addr);
         let _ = self.server.socket.send_to(frame_bytes, &self.peer.addr);
     }

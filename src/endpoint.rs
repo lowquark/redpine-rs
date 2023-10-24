@@ -13,7 +13,7 @@ pub enum TimerName {
 
 pub trait HostContext {
     // Called to send a frame to the remote host.
-    fn send(&mut self, frame_bytes: &[u8]);
+    fn send_frame(&mut self, frame_bytes: &[u8]);
 
     // Called to set the given timer
     fn set_timer(&mut self, timer: TimerName, time_ms: u64);
@@ -520,7 +520,7 @@ impl Endpoint {
 
                 let frame = frame_writer.finalize();
 
-                ctx.send(frame);
+                ctx.send_frame(frame);
             } else {
                 break 'frame_loop;
             }
@@ -554,8 +554,8 @@ mod tests {
     }
 
     impl HostContext for MockHostContext {
-        fn send(&mut self, frame_bytes: &[u8]) {
-            println!("send {:02X?}", frame_bytes);
+        fn send_frame(&mut self, frame_bytes: &[u8]) {
+            println!("send frame {:02X?}", frame_bytes);
         }
 
         fn set_timer(&mut self, timer: TimerName, time_ms: u64) {
