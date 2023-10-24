@@ -84,6 +84,8 @@ struct ServerCore {
     timer_wheel: TimerWheel,
     // Queue of pending events
     events: VecDeque<Event>,
+    // Weak pointer to self, for peer creation
+    self_weak: ServerCoreWeak,
 }
 
 type ServerCoreRc = Rc<RefCell<ServerCore>>;
@@ -95,7 +97,7 @@ pub struct Server {
     // Permits both blocking and non-blocking reads from a non-blocking socket
     receiver: SocketReceiver,
     // Always-allocated timer expiration buffer
-    timer_data_expired: Vec<PeerTimerData>,
+    timer_data_buffer: Vec<PeerTimerData>,
     // Cached from socket initialization
     local_addr: net::SocketAddr,
 }
@@ -226,13 +228,16 @@ impl PeerTable {
         self.peers.get(addr)
     }
 
-    pub fn insert(&mut self, addr: &net::SocketAddr, server_rc: &ServerCoreRc) -> Option<PeerRc> {
+    pub fn insert(
+        &mut self,
+        addr: &net::SocketAddr,
+        server_weak: ServerCoreWeak,
+    ) -> Option<PeerRc> {
         // Ensure a peer does not already exist at this address
         if !self.peers.contains_key(addr) {
             // Allocate an ID (an empty stack means we have reached the peer limit)
             if let Some(new_id) = self.free_ids.pop() {
                 // Create new peer object
-                let server_weak = Rc::downgrade(server_rc);
                 let peer = Peer::new(new_id, addr.clone(), server_weak);
                 let peer_rc = Rc::new(RefCell::new(peer));
 
@@ -334,10 +339,10 @@ impl ServerCore {
         (time::Instant::now() - self.time_ref).as_millis() as u64
     }
 
-    fn step_timer_wheel(&mut self, timer_data_expired: &mut Vec<PeerTimerData>) -> u64 {
+    fn step_timer_wheel(&mut self, timer_data_buffer: &mut Vec<PeerTimerData>) -> u64 {
         let now_ms = self.time_now_ms();
 
-        self.timer_wheel.step(now_ms, timer_data_expired);
+        self.timer_wheel.step(now_ms, timer_data_buffer);
 
         return now_ms;
     }
@@ -365,179 +370,134 @@ impl ServerCore {
             .next_expiration_time_ms()
             .map(|expire_time_ms| time::Duration::from_millis(expire_time_ms - now_ms));
     }
-}
 
-fn handle_handshake_alpha(server_rc: &ServerCoreRc, sender_addr: &net::SocketAddr) {
-    println!("acking phase α...");
-    let _ = server_rc.borrow().socket.send_to(&[0xA1], sender_addr);
-}
+    /// Processes all pending timer events.
+    pub fn handle_timeouts(&mut self, timer_data_buffer: &mut Vec<PeerTimerData>) {
+        let now_ms = self.step_timer_wheel(timer_data_buffer);
 
-fn handle_handshake_beta(server_rc: &ServerCoreRc, sender_addr: &net::SocketAddr) {
-    let ref mut server = *server_rc.borrow_mut();
+        for timer_data in timer_data_buffer.drain(..) {
+            let ref mut peer = *timer_data.peer_rc.borrow_mut();
 
-    if let Some(peer_rc) = server.peer_table.insert(sender_addr, server_rc) {
-        let now_ms = server.time_now_ms();
+            let ref mut ctx = EndpointContext::new(self, &mut peer.core, &timer_data.peer_rc);
 
-        let ref mut peer = *peer_rc.borrow_mut();
+            peer.endpoint
+                .handle_timer(timer_data.timer_name, now_ms, ctx);
+        }
+    }
 
-        let ref mut endpoint = peer.endpoint;
-        let ref mut peer_core = peer.core;
+    fn handle_handshake_alpha(&self, sender_addr: &net::SocketAddr) {
+        println!("acking phase α...");
+        let _ = self.socket.send_to(&[0xA1], sender_addr);
+    }
 
-        let ref mut ctx = EndpointContext::new(server, peer_core, &peer_rc);
+    fn handle_handshake_beta(&mut self, sender_addr: &net::SocketAddr) {
+        if let Some(peer_rc) = self
+            .peer_table
+            .insert(sender_addr, Weak::clone(&self.self_weak))
+        {
+            let now_ms = self.time_now_ms();
 
-        endpoint.init(now_ms, ctx);
+            let ref mut peer = *peer_rc.borrow_mut();
 
+            let ref mut endpoint = peer.endpoint;
+            let ref mut peer_core = peer.core;
+
+            let ref mut ctx = EndpointContext::new(self, peer_core, &peer_rc);
+
+            endpoint.init(now_ms, ctx);
+
+            println!(
+                "created peer {}, for sender address {:?}",
+                peer_core.id, sender_addr
+            );
+        }
+
+        // Always send an ack in case a previous ack was dropped.
+        println!("acking phase β...");
+        let _ = self.socket.send_to(&[0xB1], sender_addr);
+    }
+
+    fn handle_frame_other(&mut self, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
+        // If a peer is associated with this address, deliver this frame to its endpoint
+        if let Some(peer_rc) = self.peer_table.find(sender_addr) {
+            let mut peer_rc = Rc::clone(&peer_rc);
+
+            let ref mut peer = *peer_rc.borrow_mut();
+
+            let ref mut endpoint = peer.endpoint;
+            let ref mut peer_core = peer.core;
+
+            let ref mut ctx = EndpointContext::new(self, peer_core, &peer_rc);
+
+            endpoint.handle_frame(frame_bytes, ctx);
+        }
+    }
+
+    fn handle_frame(&mut self, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
         println!(
-            "created peer {}, for sender address {:?}",
-            peer_core.id, sender_addr
+            "received a packet of length {} from {:?}",
+            frame_bytes.len(),
+            sender_addr
         );
-    }
+        println!("{:02X?}", frame_bytes);
 
-    // Always send an ack in case a previous ack was dropped.
-    println!("acking phase β...");
-    let _ = server.socket.send_to(&[0xB1], sender_addr);
-}
+        let crc_valid = true;
 
-fn handle_frame_other(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
-    let ref mut server = *server_rc.borrow_mut();
+        if crc_valid {
+            // Initial handshakes are handled without an allocation in the peer table. Once a valid
+            // open request is received, the sender's address is assumed valid (i.e. blockable) and
+            // an entry in the peer table is created. Other frame types are handled by the
+            // associated peer object.
 
-    // If a peer is associated with this address, deliver this frame to its endpoint
-    if let Some(peer_rc) = server.peer_table.find(sender_addr) {
-        let mut peer_rc = Rc::clone(&peer_rc);
+            if frame_bytes == [0xA0] {
+                let valid = true;
 
-        let ref mut peer = *peer_rc.borrow_mut();
+                if valid {
+                    self.handle_handshake_alpha(sender_addr);
+                }
+            } else if frame_bytes == [0xB0] {
+                let valid = true;
 
-        let ref mut endpoint = peer.endpoint;
-        let ref mut peer_core = peer.core;
+                if valid {
+                    self.handle_handshake_beta(sender_addr);
+                }
+            } else {
+                let valid = true;
 
-        let ref mut ctx = EndpointContext::new(server, peer_core, &peer_rc);
-
-        endpoint.handle_frame(frame_bytes, ctx);
-    }
-}
-
-fn handle_frame(server_rc: &ServerCoreRc, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
-    println!(
-        "received a packet of length {} from {:?}",
-        frame_bytes.len(),
-        sender_addr
-    );
-    println!("{:02X?}", sender_addr);
-
-    let crc_valid = true;
-
-    if crc_valid {
-        // Initial handshakes are handled without an allocation in the peer table. Once a valid
-        // open request is received, the sender's address is assumed valid (i.e. blockable) and
-        // an entry in the peer table is created. Other frame types are handled by the
-        // associated peer object.
-
-        if frame_bytes == [0xA0] {
-            let valid = true;
-
-            if valid {
-                handle_handshake_alpha(server_rc, sender_addr);
-            }
-        } else if frame_bytes == [0xB0] {
-            let valid = true;
-
-            if valid {
-                handle_handshake_beta(server_rc, sender_addr);
+                if valid {
+                    self.handle_frame_other(frame_bytes, sender_addr);
+                }
             }
         } else {
-            let valid = true;
-
-            if valid {
-                handle_frame_other(server_rc, frame_bytes, sender_addr);
-            }
+            // We don't negotiate with entropy
         }
-    } else {
-        // We don't negotiate with entropy
     }
-}
 
-fn handle_timer(
-    server_rc: &ServerCoreRc,
-    peer_rc: &PeerRc,
-    timer_name: endpoint::TimerName,
-    now_ms: u64,
-) {
-    let ref mut server = *server_rc.borrow_mut();
-    let ref mut peer = *peer_rc.borrow_mut();
+    /// Reads and processes as many frames as possible from receiver without blocking.
+    pub fn handle_frames(&mut self, receiver: &mut SocketReceiver) {
+        while let Ok(Some((frame_bytes, sender_addr))) = receiver.try_read_frame() {
+            // Process this frame
+            self.handle_frame(frame_bytes, &sender_addr);
+        }
+    }
 
-    let ref mut ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
-
-    peer.endpoint.handle_timer(timer_name, now_ms, ctx);
-}
-
-fn handle_send(
-    server_rc: &ServerCoreRc,
-    peer_rc: &PeerRc,
-    packet_bytes: Box<[u8]>,
-    mode: SendMode,
-) {
-    let ref mut server = *server_rc.borrow_mut();
-    let ref mut peer = *peer_rc.borrow_mut();
-
-    let ref mut ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
-
-    peer.endpoint.send(packet_bytes, mode, ctx);
-}
-
-fn handle_flush(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
-    let ref mut server = *server_rc.borrow_mut();
-    let ref mut peer = *peer_rc.borrow_mut();
-
-    let ref mut ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
-
-    peer.endpoint.flush(ctx);
-}
-
-fn handle_disconnect(server_rc: &ServerCoreRc, peer_rc: &PeerRc) {
-    let ref mut server = *server_rc.borrow_mut();
-    let ref mut peer = *peer_rc.borrow_mut();
-
-    let ref mut ctx = EndpointContext::new(server, &mut peer.core, peer_rc);
-
-    peer.endpoint.disconnect(ctx);
+    /// Reads and processes as many frames as possible from receiver, waiting up to `wait_timeout`
+    /// for the first.
+    pub fn handle_frames_wait(
+        &mut self,
+        receiver: &mut SocketReceiver,
+        wait_timeout: Option<time::Duration>,
+    ) {
+        if let Ok(Some((frame_bytes, sender_addr))) = receiver.wait_for_frame(wait_timeout) {
+            // Process this frame
+            self.handle_frame(frame_bytes, &sender_addr);
+            // Process any further frames without blocking
+            self.handle_frames(receiver);
+        }
+    }
 }
 
 impl Server {
-    /// Reads and processes as many frames as possible without blocking.
-    fn process_available_frames(&mut self) {
-        while let Ok(Some((frame_bytes, sender_addr))) = self.receiver.try_read_frame() {
-            // Process this frame
-            handle_frame(&self.core, frame_bytes, &sender_addr);
-        }
-    }
-
-    /// Reads and processes as many frames as possible, waiting up to `wait_timeout` for the first.
-    fn process_available_frames_wait(&mut self, wait_timeout: Option<time::Duration>) {
-        if let Ok(Some((frame_bytes, sender_addr))) = self.receiver.wait_for_frame(wait_timeout) {
-            // Process this frame
-            handle_frame(&self.core, frame_bytes, &sender_addr);
-            // Process any further frames without blocking
-            return self.process_available_frames();
-        }
-    }
-
-    /// Processes all pending timer events.
-    fn process_timeouts(&mut self) {
-        let now_ms = self
-            .core
-            .borrow_mut()
-            .step_timer_wheel(&mut self.timer_data_expired);
-
-        for timer_data in self.timer_data_expired.drain(..) {
-            handle_timer(
-                &self.core,
-                &timer_data.peer_rc,
-                timer_data.timer_name,
-                now_ms,
-            );
-        }
-    }
-
     pub fn bind<A>(bind_addr: A) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
@@ -557,16 +517,26 @@ impl Server {
 
         let receiver = SocketReceiver::new(Rc::clone(&socket_rc), frame_size_max)?;
 
-        Ok(Self {
-            core: Rc::new(RefCell::new(ServerCore {
+        // In order to do interesting things with Peer objects, PeerHandles require Peers to keep a
+        // (weak) pointer to the ServerCore. The most convenient way to accomplish this is to give
+        // ServerCores a weak pointer which can be cloned upon Peer construction. The alternative
+        // is to pass pointers to the ServerCore down the frame handling call stack, which is
+        // cumbersome.
+        let core = Rc::new_cyclic(|self_weak| {
+            RefCell::new(ServerCore {
                 time_ref: time::Instant::now(),
                 socket: socket_rc,
                 peer_table: PeerTable::new(peer_count_max),
                 timer_wheel: TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
                 events: VecDeque::new(),
-            })),
+                self_weak: Weak::clone(self_weak),
+            })
+        });
+
+        Ok(Self {
+            core,
             receiver,
-            timer_data_expired: Vec::new(),
+            timer_data_buffer: Vec::new(),
             local_addr,
         })
     }
@@ -577,26 +547,30 @@ impl Server {
     /// Returns `None` if no events are available, or if an error was encountered while reading
     /// from the internal socket.
     pub fn poll_event(&mut self) -> Option<Event> {
-        if self.core.borrow().events.is_empty() {
-            self.process_available_frames();
+        let ref mut core = *self.core.borrow_mut();
 
-            self.process_timeouts();
+        if core.events.is_empty() {
+            core.handle_frames(&mut self.receiver);
+
+            core.handle_timeouts(&mut self.timer_data_buffer);
         }
 
-        return self.core.borrow_mut().events.pop_front();
+        return core.events.pop_front();
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned.
     pub fn wait_event(&mut self) -> Event {
+        let ref mut core = *self.core.borrow_mut();
+
         loop {
-            let wait_timeout = self.core.borrow().next_timer_timeout();
+            let wait_timeout = core.next_timer_timeout();
 
-            self.process_available_frames_wait(wait_timeout);
+            core.handle_frames_wait(&mut self.receiver, wait_timeout);
 
-            self.process_timeouts();
+            core.handle_timeouts(&mut self.timer_data_buffer);
 
-            if let Some(event) = self.core.borrow_mut().events.pop_front() {
+            if let Some(event) = core.events.pop_front() {
                 return event;
             }
         }
@@ -608,27 +582,26 @@ impl Server {
     ///
     /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
-        if self.core.borrow_mut().events.is_empty() {
+        let ref mut core = *self.core.borrow_mut();
+
+        if core.events.is_empty() {
             let mut remaining_timeout = timeout;
             let mut wait_begin = time::Instant::now();
 
             loop {
-                let wait_timeout =
-                    if let Some(timer_timeout) = self.core.borrow().next_timer_timeout() {
-                        remaining_timeout.min(timer_timeout)
-                    } else {
-                        remaining_timeout
-                    };
+                let wait_timeout = if let Some(timer_timeout) = core.next_timer_timeout() {
+                    remaining_timeout.min(timer_timeout)
+                } else {
+                    remaining_timeout
+                };
 
-                self.process_available_frames_wait(Some(wait_timeout));
+                core.handle_frames_wait(&mut self.receiver, Some(wait_timeout));
 
-                self.process_timeouts();
+                core.handle_timeouts(&mut self.timer_data_buffer);
 
-                let mut core_ref = self.core.borrow_mut();
-
-                if !core_ref.events.is_empty() {
+                if !core.events.is_empty() {
                     // Found what we're looking for
-                    return core_ref.events.pop_front();
+                    break;
                 }
 
                 let now = time::Instant::now();
@@ -644,7 +617,7 @@ impl Server {
             }
         }
 
-        return self.core.borrow_mut().events.pop_front();
+        return core.events.pop_front();
     }
 
     pub fn local_addr(&self) -> net::SocketAddr {
@@ -652,7 +625,9 @@ impl Server {
     }
 
     pub fn peer_count(&self) -> usize {
-        self.core.borrow().peer_table.count().into()
+        let ref core = *self.core.borrow();
+
+        core.peer_table.count().into()
     }
 }
 
@@ -662,20 +637,38 @@ impl PeerHandle {
     }
 
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        if let Some(server_rc) = Weak::upgrade(&self.peer.borrow().server_weak) {
-            handle_send(&server_rc, &self.peer, packet_bytes, mode);
+        let ref mut peer = *self.peer.borrow_mut();
+
+        if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
+            let ref mut server = *server_rc.borrow_mut();
+
+            let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
+
+            peer.endpoint.send(packet_bytes, mode, ctx);
         }
     }
 
     pub fn flush(&mut self) {
-        if let Some(server_rc) = Weak::upgrade(&self.peer.borrow().server_weak) {
-            handle_flush(&server_rc, &self.peer);
+        let ref mut peer = *self.peer.borrow_mut();
+
+        if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
+            let ref mut server = *server_rc.borrow_mut();
+
+            let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
+
+            peer.endpoint.flush(ctx);
         }
     }
 
     pub fn disconnect(&mut self) {
-        if let Some(server_rc) = Weak::upgrade(&self.peer.borrow().server_weak) {
-            handle_disconnect(&server_rc, &self.peer);
+        let ref mut peer = *self.peer.borrow_mut();
+
+        if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
+            let ref mut server = *server_rc.borrow_mut();
+
+            let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
+
+            peer.endpoint.disconnect(ctx);
         }
     }
 

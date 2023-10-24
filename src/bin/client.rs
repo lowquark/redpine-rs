@@ -24,6 +24,6 @@ fn main() {
             }
         }
 
-        println!("no event after {}ms", EVENT_TIMEOUT.as_millis());
+        // println!("no event after {}ms", EVENT_TIMEOUT.as_millis());
     }
 }

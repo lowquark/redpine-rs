@@ -193,25 +193,21 @@ pub struct DummyTxQueue {
 
 impl DummyTxQueue {
     pub fn new() -> Self {
-        let packet = Rc::new(
-            (0..1000)
-                .map(|_| rand::random::<u8>())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
-
         Self {
-            buffer: (0..200)
-                .map(|_| Fragment {
-                    id: 0xBAADBEEF,
-                    first: true,
-                    last: true,
-                    packet: Rc::clone(&packet),
-                    range: 0..rand::random::<usize>() % packet.len(),
-                })
-                .collect::<Vec<_>>()
-                .into(),
+            buffer: VecDeque::new(),
         }
+    }
+
+    pub fn push(&mut self, packet: Box<[u8]>) {
+        let packet_len = packet.len();
+
+        self.buffer.push_back(Fragment {
+            id: 0xDECAFBAD,
+            first: true,
+            last: true,
+            packet: Rc::new(packet),
+            range: 0..packet_len,
+        });
     }
 
     pub fn can_send(&self) -> bool {
@@ -219,10 +215,7 @@ impl DummyTxQueue {
     }
 
     pub fn peek(&self) -> Option<&Fragment> {
-        if let Some(x) = self.buffer.front() {
-            return Some(x);
-        }
-        return None;
+        self.buffer.front()
     }
 
     pub fn pop(&mut self) -> Option<Fragment> {
@@ -286,16 +279,14 @@ impl Endpoint {
     where
         C: HostContext,
     {
-        /*
         match mode {
             SendMode::Reliable => {
-                self.reliable_queue.push_back(packet_bytes.into());
+                self.reliable_tx.push(packet_bytes.into());
             }
             SendMode::Unreliable(timeout_ms) => {
-                self.unreliable_queue.push_back(packet_bytes.into());
+                self.unreliable_tx.push(packet_bytes.into());
             }
         }
-        */
 
         self.actual_flush(false, false, true, ctx);
     }
@@ -340,6 +331,8 @@ impl Endpoint {
                 // TODO: Validate data ID
 
                 while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
+                    ctx.on_receive(datagram.data.into());
+
                     if datagram.unrel {
                         ack_unrel = true;
                     } else {
@@ -391,12 +384,14 @@ impl Endpoint {
         let mut send_ack = ack_unrel || ack_rel;
 
         'frame_loop: loop {
+            /*
             println!(
                 "U Total: {}  R Total: {}  U/R Ratio: {}",
                 self.u_total,
                 self.r_total,
                 self.u_total as f64 / self.r_total as f64
             );
+            */
 
             let frame_window_limited = !self.tx_window.can_send();
             let congestion_window_limited = self.tx_window.bytes_in_transit() >= self.cwnd;
@@ -478,7 +473,7 @@ impl Endpoint {
                                         self.u_total += size;
                                         no_data = false;
 
-                                        println!("U {size}");
+                                        // println!("U {size}");
 
                                         // Query prio state before sending next fragment
                                         break 'inner;
@@ -507,7 +502,7 @@ impl Endpoint {
                                         self.r_total += size;
                                         no_data = false;
 
-                                        println!("R {size}");
+                                        // println!("R {size}");
 
                                         // Query prio state before sending next fragment
                                         break 'inner;
