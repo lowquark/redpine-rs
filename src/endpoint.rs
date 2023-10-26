@@ -114,6 +114,30 @@ impl FrameTxWindow {
 
 struct FrameRxWindow {
     base_id: u32,
+    size: u32,
+}
+
+impl FrameRxWindow {
+    pub fn new(base_id: u32, size: u32) -> Self {
+        Self {
+            base_id,
+            size,
+        }
+    }
+
+    pub fn can_receive(&self, id: u32) -> bool {
+        id.wrapping_sub(self.base_id) < self.size
+    }
+
+    pub fn mark_received(&mut self, id: u32) {
+        debug_assert!(self.can_receive(id));
+
+        self.base_id = id.wrapping_add(1);
+    }
+
+    pub fn next_expected_id(&self) -> u32 {
+        self.base_id
+    }
 }
 
 struct TxPrioState {
@@ -180,6 +204,8 @@ impl TxPrioState {
 pub struct Endpoint {
     // Sender state
     tx_window: FrameTxWindow,
+    rx_window: FrameRxWindow,
+
     cwnd: usize,
 
     prio_state: TxPrioState,
@@ -206,6 +232,7 @@ impl Endpoint {
 
         Self {
             tx_window: FrameTxWindow::new(0, 20),
+            rx_window: FrameRxWindow::new(0, 20),
             cwnd: 15000,
 
             prio_state: TxPrioState::new(1, 2, 10_000, 20_000),
@@ -292,30 +319,34 @@ impl Endpoint {
 
         if read_data {
             if let Some(stream_data_header) = frame_reader.read::<frame::StreamDataHeader>() {
-                // TODO: Validate data ID
+                // TODO: Permit out-of-order frames
 
-                while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
-                    let unrel = datagram.unrel;
+                if self.rx_window.can_receive(stream_data_header.id) {
+                    self.rx_window.mark_received(stream_data_header.id);
 
-                    let ref fragment = buffer::FragmentRef {
-                        id: datagram.id,
-                        first: datagram.first,
-                        last: datagram.last,
-                        data: datagram.data,
-                    };
+                    while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
+                        let unrel = datagram.unrel;
 
-                    if unrel {
-                        if let Some(packet) = self.unreliable_rx.receive(fragment) {
-                            ctx.on_receive(packet);
+                        let ref fragment = buffer::FragmentRef {
+                            id: datagram.id,
+                            first: datagram.first,
+                            last: datagram.last,
+                            data: datagram.data,
+                        };
+
+                        if unrel {
+                            if let Some(packet) = self.unreliable_rx.receive(fragment) {
+                                ctx.on_receive(packet);
+                            }
+
+                            ack_unrel = true;
+                        } else {
+                            if let Some(packet) = self.reliable_rx.receive(fragment) {
+                                ctx.on_receive(packet);
+                            }
+
+                            ack_rel = true;
                         }
-
-                        ack_unrel = true;
-                    } else {
-                        if let Some(packet) = self.reliable_rx.receive(fragment) {
-                            ctx.on_receive(packet);
-                        }
-
-                        ack_rel = true;
                     }
                 }
             }
@@ -400,7 +431,7 @@ impl Endpoint {
                     frame::serial::FrameWriter::new(&mut self.tx_buffer, frame_type).unwrap();
 
                 if send_ack {
-                    let data_id = 0x99C0FFEE;
+                    let data_id = self.rx_window.next_expected_id();
 
                     let unrel_id = if ack_unrel { Some(self.unreliable_rx.next_expected_id()) } else { None };
 
