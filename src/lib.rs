@@ -157,6 +157,7 @@ The counter saturates at user-defined positive and negative values.
 
 */
 
+mod buffer;
 pub mod client;
 mod endpoint;
 mod frame;

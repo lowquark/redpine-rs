@@ -14,7 +14,7 @@ fn main() {
                     println!("server::Event::Disconnect");
                 }
                 ufl::server::Event::Receive(mut peer, packet_bytes) => {
-                    println!("server::Event::Receive");
+                    println!("server::Event::Receive {:02X?}", packet_bytes);
 
                     peer.send(packet_bytes, ufl::SendMode::Unreliable(0));
                     peer.flush();
