@@ -577,6 +577,49 @@ impl<'a> FrameReader<'a> {
 
         return None;
     }
+
+    pub fn remaining_bytes(&self) -> &[u8] {
+        let begin_idx = self.read_idx;
+        let end_idx = self.buffer.len() - FRAME_CRC_SIZE;
+
+        &self.buffer[begin_idx..end_idx]
+    }
+}
+
+pub struct EzReader<'a> {
+    buffer: &'a [u8],
+    read_idx: usize,
+}
+
+impl<'a> EzReader<'a> {
+    pub fn new(buffer: &'a [u8]) -> Self {
+        Self {
+            buffer,
+            read_idx: 0,
+        }
+    }
+
+    pub fn read<A>(&mut self) -> Option<A>
+    where
+        A: Serial<'a>,
+    {
+        let begin_idx = self.read_idx;
+        let end_idx = self.buffer.len();
+
+        if let Some((obj, size)) = A::read(&self.buffer[begin_idx..end_idx]) {
+            self.read_idx += size;
+            return Some(obj);
+        }
+
+        return None;
+    }
+
+    pub fn remaining_bytes(&self) -> &[u8] {
+        let begin_idx = self.read_idx;
+        let end_idx = self.buffer.len();
+
+        &self.buffer[begin_idx..end_idx]
+    }
 }
 
 #[cfg(test)]

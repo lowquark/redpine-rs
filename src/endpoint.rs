@@ -112,34 +112,6 @@ impl FrameTxWindow {
     }
 }
 
-struct FrameRxWindow {
-    base_id: u32,
-    size: u32,
-}
-
-impl FrameRxWindow {
-    pub fn new(base_id: u32, size: u32) -> Self {
-        Self {
-            base_id,
-            size,
-        }
-    }
-
-    pub fn can_receive(&self, id: u32) -> bool {
-        id.wrapping_sub(self.base_id) < self.size
-    }
-
-    pub fn mark_received(&mut self, id: u32) {
-        debug_assert!(self.can_receive(id));
-
-        self.base_id = id.wrapping_add(1);
-    }
-
-    pub fn next_expected_id(&self) -> u32 {
-        self.base_id
-    }
-}
-
 struct TxPrioState {
     counter: i32,
     w_r: u8,
@@ -202,9 +174,8 @@ impl TxPrioState {
 }
 
 pub struct Endpoint {
-    // Sender state
     tx_window: FrameTxWindow,
-    rx_window: FrameRxWindow,
+    frame_rx_buffer: buffer::FrameRxBuffer,
 
     cwnd: usize,
 
@@ -220,9 +191,6 @@ pub struct Endpoint {
     r_total: usize,
 
     tx_buffer: [u8; 1478],
-
-    // Receiver state
-    rx_packets: VecDeque<Box<[u8]>>,
 }
 
 impl Endpoint {
@@ -232,7 +200,7 @@ impl Endpoint {
 
         Self {
             tx_window: FrameTxWindow::new(0, 20),
-            rx_window: FrameRxWindow::new(0, 20),
+            frame_rx_buffer: buffer::FrameRxBuffer::new(0, 20, fragment_size),
             cwnd: 15000,
 
             prio_state: TxPrioState::new(1, 2, 10_000, 20_000),
@@ -247,8 +215,6 @@ impl Endpoint {
             r_total: 0,
 
             tx_buffer: [0; 1478],
-
-            rx_packets: VecDeque::new(),
         }
     }
 
@@ -286,9 +252,6 @@ impl Endpoint {
     ) where
         C: HostContext,
     {
-        let mut read_ack = false;
-        let mut read_data = false;
-
         let (read_ack, read_data) = match frame_type {
             frame::FrameType::StreamData => (false, true),
             frame::FrameType::StreamAck => (true, false),
@@ -319,36 +282,40 @@ impl Endpoint {
 
         if read_data {
             if let Some(stream_data_header) = frame_reader.read::<frame::StreamDataHeader>() {
-                // TODO: Permit out-of-order frames
+                let data_id = stream_data_header.id;
+                let data_bytes = frame_reader.remaining_bytes();
 
-                if self.rx_window.can_receive(stream_data_header.id) {
-                    self.rx_window.mark_received(stream_data_header.id);
+                self.frame_rx_buffer
+                    .receive(data_id, data_bytes, |stream_data: &[u8]| {
+                        let mut frame_reader = frame::serial::EzReader::new(stream_data);
 
-                    while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
-                        let unrel = datagram.unrel;
+                        while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
+                            let unrel = datagram.unrel;
 
-                        let ref fragment = buffer::FragmentRef {
-                            id: datagram.id,
-                            first: datagram.first,
-                            last: datagram.last,
-                            data: datagram.data,
-                        };
+                            let ref fragment = buffer::FragmentRef {
+                                id: datagram.id,
+                                first: datagram.first,
+                                last: datagram.last,
+                                data: datagram.data,
+                            };
 
-                        if unrel {
-                            if let Some(packet) = self.unreliable_rx.receive(fragment) {
-                                ctx.on_receive(packet);
+                            if unrel {
+                                if let Some(packet) = self.unreliable_rx.receive(fragment) {
+                                    ctx.on_receive(packet);
+                                }
+
+                                ack_unrel = true;
+                            } else {
+                                if let Some(packet) = self.reliable_rx.receive(fragment) {
+                                    ctx.on_receive(packet);
+                                }
+
+                                ack_rel = true;
                             }
-
-                            ack_unrel = true;
-                        } else {
-                            if let Some(packet) = self.reliable_rx.receive(fragment) {
-                                ctx.on_receive(packet);
-                            }
-
-                            ack_rel = true;
                         }
-                    }
-                }
+                    });
+
+                // TODO: Set the receive timer if there are frames in the receive buffer
             }
         }
 
@@ -413,10 +380,12 @@ impl Endpoint {
                 try_send_data && !frame_window_limited && !congestion_window_limited && data_ready;
 
             if !send_data {
-                println!("can't send data: {}{}{}",
-                         if frame_window_limited { 'f' } else { '-' },
-                         if congestion_window_limited { 'c' } else { '-' },
-                         if !data_ready { 'd' } else { '-' });
+                println!(
+                    "can't send data: {}{}{}",
+                    if frame_window_limited { 'f' } else { '-' },
+                    if congestion_window_limited { 'c' } else { '-' },
+                    if !data_ready { 'd' } else { '-' }
+                );
             }
 
             if send_ack || send_data {
@@ -431,11 +400,19 @@ impl Endpoint {
                     frame::serial::FrameWriter::new(&mut self.tx_buffer, frame_type).unwrap();
 
                 if send_ack {
-                    let data_id = self.rx_window.next_expected_id();
+                    let data_id = self.frame_rx_buffer.next_expected_id();
 
-                    let unrel_id = if ack_unrel { Some(self.unreliable_rx.next_expected_id()) } else { None };
+                    let unrel_id = if ack_unrel {
+                        Some(self.unreliable_rx.next_expected_id())
+                    } else {
+                        None
+                    };
 
-                    let rel_id = if ack_rel { Some(self.reliable_rx.next_expected_id()) } else { None };
+                    let rel_id = if ack_rel {
+                        Some(self.reliable_rx.next_expected_id())
+                    } else {
+                        None
+                    };
 
                     let ack = frame::StreamAck {
                         data_id,
@@ -450,7 +427,9 @@ impl Endpoint {
                 }
 
                 if send_data {
-                    let header = frame::StreamDataHeader { id: self.tx_window.next_id() };
+                    let header = frame::StreamDataHeader {
+                        id: self.tx_window.next_id(),
+                    };
 
                     frame_writer.write(&header);
 

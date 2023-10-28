@@ -46,14 +46,17 @@ impl<'a> From<&'a FragmentRc> for FragmentRef<'a> {
     }
 }
 
+mod frame;
 mod reliable;
 mod unreliable;
 
-pub use reliable::RxBuffer as ReliableRxBuffer;
-pub use reliable::TxBuffer as ReliableTxBuffer;
+pub use frame::RxBuffer as FrameRxBuffer;
 
 pub use unreliable::RxBuffer as UnreliableRxBuffer;
 pub use unreliable::TxBuffer as UnreliableTxBuffer;
+
+pub use reliable::RxBuffer as ReliableRxBuffer;
+pub use reliable::TxBuffer as ReliableTxBuffer;
 
 struct FragmentGen {
     fragment_size: usize,
