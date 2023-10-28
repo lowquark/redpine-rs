@@ -241,7 +241,7 @@ impl Endpoint {
             }
         }
 
-        self.actual_flush(false, false, true, ctx);
+        self.actual_flush(false, false, ctx);
     }
 
     fn handle_primary<C>(
@@ -259,7 +259,6 @@ impl Endpoint {
             _ => panic!("NANI?"),
         };
 
-        let mut try_send_data = false;
         let mut ack_unrel = false;
         let mut ack_rel = false;
 
@@ -275,9 +274,6 @@ impl Endpoint {
                     self.reliable_tx.acknowledge(rel_id);
                 }
             }
-
-            // TODO: When wouldn't we try to send data?
-            try_send_data = true;
         }
 
         if read_data {
@@ -319,7 +315,7 @@ impl Endpoint {
             }
         }
 
-        self.actual_flush(ack_unrel, ack_rel, try_send_data, ctx);
+        self.actual_flush(ack_unrel, ack_rel, ctx);
     }
 
     pub fn handle_frame<C>(&mut self, frame_bytes: &[u8], ctx: &mut C)
@@ -354,7 +350,7 @@ impl Endpoint {
         }
     }
 
-    fn actual_flush<C>(&mut self, ack_unrel: bool, ack_rel: bool, try_send_data: bool, ctx: &mut C)
+    fn actual_flush<C>(&mut self, ack_unrel: bool, ack_rel: bool, ctx: &mut C)
     where
         C: HostContext,
     {
@@ -376,8 +372,7 @@ impl Endpoint {
             let rel_data_ready = self.reliable_tx.peek_sendable().is_some();
             let data_ready = unrel_data_ready | rel_data_ready;
 
-            let send_data =
-                try_send_data && !frame_window_limited && !congestion_window_limited && data_ready;
+            let send_data = !frame_window_limited && !congestion_window_limited && data_ready;
 
             if !send_data {
                 println!(
@@ -534,7 +529,7 @@ impl Endpoint {
     where
         C: HostContext,
     {
-        self.actual_flush(false, false, true, ctx);
+        self.actual_flush(false, false, ctx);
     }
 
     pub fn disconnect<C>(&mut self, ctx: &mut C)
@@ -591,6 +586,6 @@ mod tests {
         let mut host_ctx = MockHostContext::new();
         let mut endpoint = Endpoint::new();
 
-        endpoint.actual_flush(true, true, true, &mut host_ctx);
+        endpoint.actual_flush(true, true, &mut host_ctx);
     }
 }
