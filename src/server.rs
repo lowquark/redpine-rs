@@ -420,7 +420,7 @@ impl ServerCore {
     fn handle_frame_other(&mut self, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
         // If a peer is associated with this address, deliver this frame to its endpoint
         if let Some(peer_rc) = self.peer_table.find(sender_addr) {
-            let mut peer_rc = Rc::clone(&peer_rc);
+            let peer_rc = Rc::clone(&peer_rc);
 
             let ref mut peer = *peer_rc.borrow_mut();
 

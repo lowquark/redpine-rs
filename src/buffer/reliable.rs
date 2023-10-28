@@ -4,8 +4,6 @@ use super::FragmentRef;
 use super::Window;
 
 use std::collections::VecDeque;
-use std::ops::Range;
-use std::rc::Rc;
 
 #[derive(Debug)]
 pub struct TxBuffer {
@@ -193,6 +191,9 @@ impl RxBuffer {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+    use std::rc::Rc;
+
     use super::*;
 
     // Tests peek in all cases that we test pop
@@ -538,12 +539,17 @@ mod tests {
             rng.fill(&mut packet_data[..]);
 
             let generator = FragmentGen::new(packet_data.clone(), fragment_size, initial_base_id);
-            let count = generator.fragment_count();
+
+            let fragment_count = if packet_data.len() == 0 {
+                1
+            } else {
+                (packet_data.len() + fragment_size - 1) / fragment_size
+            };
 
             for (idx, ref fragment) in generator.enumerate() {
                 let result = recv_buf.receive(&fragment.into());
 
-                if idx == count - 1 {
+                if idx == fragment_count - 1 {
                     assert_eq!(result, Some(packet_data));
                     break;
                 } else {

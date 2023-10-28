@@ -62,7 +62,6 @@ struct FragmentGen {
     fragment_size: usize,
 
     fragment_index: usize,
-    fragment_count: usize,
 
     source: Option<Rc<Box<[u8]>>>,
     source_index_bytes: usize,
@@ -73,18 +72,9 @@ impl FragmentGen {
     pub fn new(packet: Box<[u8]>, fragment_size: usize, first_fragment_id: u32) -> Self {
         assert!(fragment_size > 0);
 
-        let fragment_count = if packet.len() == 0 {
-            1
-        } else {
-            (packet.len() + fragment_size - 1) / fragment_size
-        };
-
         Self {
             fragment_size,
-
             fragment_index: 0,
-            fragment_count,
-
             source: Some(Rc::new(packet)),
             source_index_bytes: 0,
             next_fragment_id: first_fragment_id,
@@ -93,10 +83,6 @@ impl FragmentGen {
 
     pub fn next_fragment_id(&self) -> u32 {
         self.next_fragment_id
-    }
-
-    pub fn fragment_count(&self) -> usize {
-        self.fragment_count
     }
 }
 

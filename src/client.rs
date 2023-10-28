@@ -319,7 +319,7 @@ impl ClientCore {
                             let packet_buffer = std::mem::take(&mut state.packet_buffer);
 
                             // Create an endpoint now that we're connected
-                            let mut endpoint = endpoint::Endpoint::new();
+                            let endpoint = endpoint::Endpoint::new();
                             let endpoint_rc = Rc::new(RefCell::new(endpoint));
 
                             // Switch to active state

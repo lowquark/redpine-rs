@@ -93,7 +93,6 @@ impl<'a> Reader<'a> {
 pub struct Writer<'a> {
     ptr: *mut u8,
     bytes_written: usize,
-    max_size: usize,
     _lifetime: std::marker::PhantomData<&'a ()>,
 }
 
@@ -102,13 +101,8 @@ impl<'a> Writer<'a> {
         Self {
             ptr: buffer.as_mut_ptr(),
             bytes_written: 0,
-            max_size: buffer.len(),
             _lifetime: Default::default(),
         }
-    }
-
-    pub fn bytes_remaining(&self) -> usize {
-        self.max_size - self.bytes_written
     }
 
     pub fn bytes_written(&self) -> usize {
@@ -433,7 +427,7 @@ impl<'a> Serial<'a> for Datagram<'a> {
             info_bits |= DATAGRAM_LAST_BIT;
         }
 
-        assert!(obj.data.len() <= u16::max_value() as usize);
+        assert!(obj.data.len() <= DATAGRAM_DATA_SIZE_MAX);
         let data_len_u16 = obj.data.len() as u16;
 
         let mut wr = Writer::new(dst);
@@ -551,8 +545,6 @@ impl<'a> FrameReader<'a> {
         debug_assert_eq!(rd.bytes_read(), FRAME_HEADER_SIZE);
 
         // TODO: Validate CRC
-
-        let bytes_rem = buffer.len() - FRAME_HEADER_SIZE - FRAME_CRC_SIZE;
 
         Some((
             Self {
@@ -678,6 +670,8 @@ mod tests {
             let frame = writer.finalize();
 
             let (mut reader, frame_type) = serial::FrameReader::new(frame).unwrap();
+
+            assert_eq!(frame_type, FrameType::StreamData);
 
             for i in 0..datagram_count {
                 let dg = reader.read::<Datagram>().unwrap();

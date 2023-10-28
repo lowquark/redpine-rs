@@ -4,8 +4,6 @@ use super::FragmentRef;
 use super::Window;
 
 use std::collections::VecDeque;
-use std::ops::Range;
-use std::rc::Rc;
 
 // No sendable fragments sent:
 // v---------------
@@ -208,6 +206,9 @@ impl RxBuffer {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+    use std::rc::Rc;
+
     use super::*;
 
     // Tests peek in all cases that we test pop

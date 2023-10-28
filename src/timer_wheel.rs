@@ -376,7 +376,7 @@ fn debug_fmt_row<T>(
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
     let entry = &wheel.timer_entries[timer_idx as usize];
-    let handler = &wheel.timer_data[timer_idx as usize];
+    let data = &wheel.timer_data[timer_idx as usize];
 
     write!(
         f,
@@ -384,8 +384,8 @@ fn debug_fmt_row<T>(
         timer_idx, entry.next_idx, entry.prev_idx, entry.timeout_time_ms
     )?;
 
-    if let Some(handler) = handler {
-        writeln!(f, " handler: Some(...)")?;
+    if data.is_some() {
+        writeln!(f, " data: Some(...)")?;
     } else {
         writeln!(f, "")?;
     }

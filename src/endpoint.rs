@@ -236,7 +236,7 @@ impl Endpoint {
             SendMode::Reliable => {
                 self.reliable_tx.push(packet_bytes);
             }
-            SendMode::Unreliable(timeout_ms) => {
+            SendMode::Unreliable(_timeout_ms) => {
                 self.unreliable_tx.push(packet_bytes);
             }
         }
@@ -324,13 +324,9 @@ impl Endpoint {
     {
         if let Some((mut frame_reader, frame_type)) = frame::serial::FrameReader::new(frame_bytes) {
             match frame_type {
-                frame::FrameType::StreamData => {
-                    self.handle_primary(&mut frame_reader, frame_type, ctx)
-                }
-                frame::FrameType::StreamAck => {
-                    self.handle_primary(&mut frame_reader, frame_type, ctx)
-                }
-                frame::FrameType::StreamDataAck => {
+                frame::FrameType::StreamData
+                | frame::FrameType::StreamAck
+                | frame::FrameType::StreamDataAck => {
                     self.handle_primary(&mut frame_reader, frame_type, ctx)
                 }
                 _ => (),
@@ -338,7 +334,7 @@ impl Endpoint {
         }
     }
 
-    pub fn handle_timer<C>(&mut self, timer: TimerName, now_ms: u64, ctx: &mut C)
+    pub fn handle_timer<C>(&mut self, timer: TimerName, _now_ms: u64, _ctx: &mut C)
     where
         C: HostContext,
     {
@@ -346,7 +342,9 @@ impl Endpoint {
             TimerName::Rto => {
                 println!("Rto timer expired!");
             }
-            TimerName::Receive => {}
+            TimerName::Receive => {
+                println!("Receive timer expired!");
+            }
         }
     }
 
@@ -532,7 +530,7 @@ impl Endpoint {
         self.actual_flush(false, false, ctx);
     }
 
-    pub fn disconnect<C>(&mut self, ctx: &mut C)
+    pub fn disconnect<C>(&mut self, _ctx: &mut C)
     where
         C: HostContext,
     {
