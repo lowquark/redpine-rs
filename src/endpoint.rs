@@ -175,7 +175,7 @@ impl TxPrioState {
 
 pub struct Endpoint {
     tx_window: FrameTxWindow,
-    frame_rx_buffer: buffer::FrameRxBuffer,
+    segment_rx_buffer: buffer::SegmentRxBuffer,
 
     cwnd: usize,
 
@@ -200,7 +200,7 @@ impl Endpoint {
 
         Self {
             tx_window: FrameTxWindow::new(0, 20),
-            frame_rx_buffer: buffer::FrameRxBuffer::new(0, 20, fragment_size),
+            segment_rx_buffer: buffer::SegmentRxBuffer::new(0, 20, fragment_size),
             cwnd: 15000,
 
             prio_state: TxPrioState::new(1, 2, 10_000, 20_000),
@@ -281,7 +281,7 @@ impl Endpoint {
                 let data_id = stream_data_header.id;
                 let data_bytes = frame_reader.remaining_bytes();
 
-                self.frame_rx_buffer
+                self.segment_rx_buffer
                     .receive(data_id, data_bytes, |stream_data: &[u8]| {
                         let mut frame_reader = frame::serial::EzReader::new(stream_data);
 
@@ -393,7 +393,7 @@ impl Endpoint {
                     frame::serial::FrameWriter::new(&mut self.tx_buffer, frame_type).unwrap();
 
                 if send_ack {
-                    let data_id = self.frame_rx_buffer.next_expected_id();
+                    let data_id = self.segment_rx_buffer.next_expected_id();
 
                     let unrel_id = if ack_unrel {
                         Some(self.unreliable_rx.next_expected_id())
