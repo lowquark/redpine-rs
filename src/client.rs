@@ -335,7 +335,7 @@ impl ClientCore {
                             endpoint.init(now_ms, host_ctx);
 
                             for (packet, mode) in packet_buffer.into_iter() {
-                                endpoint.send(packet, mode, host_ctx);
+                                endpoint.send(packet, mode, now_ms, host_ctx);
                             }
                         }
                     }
@@ -345,7 +345,9 @@ impl ClientCore {
 
                     let ref mut host_ctx = EndpointContext::new(self);
 
-                    endpoint_rc.borrow_mut().handle_frame(frame_bytes, host_ctx);
+                    endpoint_rc
+                        .borrow_mut()
+                        .handle_frame(frame_bytes, now_ms, host_ctx);
                 }
                 State::Closed => {}
             }
@@ -385,9 +387,13 @@ impl ClientCore {
             State::Active(state) => {
                 let endpoint_rc = Rc::clone(&state.endpoint_rc);
 
+                let now_ms = self.time_now_ms();
+
                 let ref mut host_ctx = EndpointContext::new(self);
 
-                endpoint_rc.borrow_mut().send(packet_bytes, mode, host_ctx);
+                endpoint_rc
+                    .borrow_mut()
+                    .send(packet_bytes, mode, now_ms, host_ctx);
             }
             State::Closed => {}
         }
@@ -399,9 +405,11 @@ impl ClientCore {
             State::Active(state) => {
                 let endpoint_rc = Rc::clone(&state.endpoint_rc);
 
+                let now_ms = self.time_now_ms();
+
                 let ref mut host_ctx = EndpointContext::new(self);
 
-                endpoint_rc.borrow_mut().flush(host_ctx);
+                endpoint_rc.borrow_mut().flush(now_ms, host_ctx);
             }
             State::Closed => {}
         }

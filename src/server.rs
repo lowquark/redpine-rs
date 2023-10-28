@@ -418,6 +418,8 @@ impl ServerCore {
     }
 
     fn handle_frame_other(&mut self, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
+        let now_ms = self.time_now_ms();
+
         // If a peer is associated with this address, deliver this frame to its endpoint
         if let Some(peer_rc) = self.peer_table.find(sender_addr) {
             let peer_rc = Rc::clone(&peer_rc);
@@ -429,7 +431,7 @@ impl ServerCore {
 
             let ref mut ctx = EndpointContext::new(self, peer_core, &peer_rc);
 
-            endpoint.handle_frame(frame_bytes, ctx);
+            endpoint.handle_frame(frame_bytes, now_ms, ctx);
         }
     }
 
@@ -637,9 +639,11 @@ impl PeerHandle {
         if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
             let ref mut server = *server_rc.borrow_mut();
 
+            let now_ms = server.time_now_ms();
+
             let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
 
-            peer.endpoint.send(packet_bytes, mode, ctx);
+            peer.endpoint.send(packet_bytes, mode, now_ms, ctx);
         }
     }
 
@@ -649,9 +653,11 @@ impl PeerHandle {
         if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
             let ref mut server = *server_rc.borrow_mut();
 
+            let now_ms = server.time_now_ms();
+
             let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
 
-            peer.endpoint.flush(ctx);
+            peer.endpoint.flush(now_ms, ctx);
         }
     }
 
@@ -661,9 +667,11 @@ impl PeerHandle {
         if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
             let ref mut server = *server_rc.borrow_mut();
 
+            let now_ms = server.time_now_ms();
+
             let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
 
-            peer.endpoint.disconnect(ctx);
+            peer.endpoint.disconnect(now_ms, ctx);
         }
     }
 

@@ -268,6 +268,8 @@ impl FragmentTxBuffers {
     }
 }
 
+const RESEND_TIMEOUT_MS: u64 = 3000;
+
 pub struct Endpoint {
     // Sender state
     tx_window: FrameTxWindow,
@@ -276,6 +278,8 @@ pub struct Endpoint {
     cwnd: usize,
 
     tx_buffer: [u8; 1478],
+
+    rto_timer_set: bool,
 
     // Receiver state
     segment_rx_buffer: buffer::SegmentRxBuffer,
@@ -293,35 +297,34 @@ impl Endpoint {
             tx_data: FragmentTxBuffers::new(0, fragment_window_size, fragment_size),
             cwnd: 15000,
             tx_buffer: [0; 1478],
+            rto_timer_set: false,
             segment_rx_buffer: buffer::SegmentRxBuffer::new(0, 20, fragment_size),
             unreliable_rx: buffer::UnreliableRxBuffer::new(0, fragment_window_size, fragment_size),
             reliable_rx: buffer::ReliableRxBuffer::new(0, fragment_size),
         }
     }
 
-    pub fn init<C>(&mut self, now_ms: u64, ctx: &mut C)
+    pub fn init<C>(&mut self, _now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
         ctx.on_connect();
-
-        // Set a dummy timer, just for fun
-        ctx.set_timer(TimerName::Rto, now_ms + 500);
     }
 
-    pub fn send<C>(&mut self, packet_bytes: Box<[u8]>, mode: SendMode, ctx: &mut C)
+    pub fn send<C>(&mut self, packet_bytes: Box<[u8]>, mode: SendMode, now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
         self.tx_data.enqueue(packet_bytes, mode);
 
-        self.actual_flush(false, false, ctx);
+        self.actual_flush(false, false, now_ms, ctx);
     }
 
     fn handle_primary<C>(
         &mut self,
         frame_reader: &mut frame::serial::FrameReader,
         frame_type: frame::FrameType,
+        now_ms: u64,
         ctx: &mut C,
     ) where
         C: HostContext,
@@ -341,6 +344,20 @@ impl Endpoint {
                 self.tx_window.acknowledge(stream_ack.data_id);
 
                 self.tx_data.acknowledge(stream_ack.unrel_id, stream_ack.rel_id);
+
+                if self.rto_timer_set {
+                    if stream_ack.data_id == self.tx_window.next_id() {
+                        // All caught up
+                        ctx.unset_timer(TimerName::Rto);
+                        self.rto_timer_set = false;
+                    } else {
+                        // More acks expected
+                        ctx.set_timer(TimerName::Rto, now_ms + RESEND_TIMEOUT_MS);
+                    }
+                }
+            } else {
+                // Truncated packet?
+                return;
             }
         }
 
@@ -383,10 +400,10 @@ impl Endpoint {
             }
         }
 
-        self.actual_flush(ack_unrel, ack_rel, ctx);
+        self.actual_flush(ack_unrel, ack_rel, now_ms, ctx);
     }
 
-    pub fn handle_frame<C>(&mut self, frame_bytes: &[u8], ctx: &mut C)
+    pub fn handle_frame<C>(&mut self, frame_bytes: &[u8], now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
@@ -395,20 +412,32 @@ impl Endpoint {
                 frame::FrameType::StreamData
                 | frame::FrameType::StreamAck
                 | frame::FrameType::StreamDataAck => {
-                    self.handle_primary(&mut frame_reader, frame_type, ctx)
+                    self.handle_primary(&mut frame_reader, frame_type, now_ms, ctx)
                 }
                 _ => (),
             }
         }
     }
 
-    pub fn handle_timer<C>(&mut self, timer: TimerName, _now_ms: u64, _ctx: &mut C)
+    pub fn handle_timer<C>(&mut self, timer: TimerName, now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
         match timer {
             TimerName::Rto => {
                 println!("Rto timer expired!");
+                debug_assert!(self.rto_timer_set);
+
+                // TODO: Is it correct to assume more data can be sent, considering an ack has not
+                // been received that would have otherwise advanced send windows?
+
+                // TODO: Should a sync frame be sent instead of data?
+
+                // TODO: Should the reliable fragment queue be reset here?
+
+                self.actual_flush(false, false, now_ms, ctx);
+
+                ctx.set_timer(TimerName::Rto, now_ms + RESEND_TIMEOUT_MS);
             }
             TimerName::Receive => {
                 println!("Receive timer expired!");
@@ -416,7 +445,7 @@ impl Endpoint {
         }
     }
 
-    fn actual_flush<C>(&mut self, ack_unrel: bool, ack_rel: bool, ctx: &mut C)
+    fn actual_flush<C>(&mut self, ack_unrel: bool, ack_rel: bool, now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
@@ -497,6 +526,12 @@ impl Endpoint {
                     debug_assert!(size_written > 0);
 
                     self.tx_window.mark_sent(size_written);
+
+                    // Acks are expected, set the resend timeout if not already
+                    if !self.rto_timer_set {
+                        ctx.set_timer(TimerName::Rto, now_ms + RESEND_TIMEOUT_MS);
+                        self.rto_timer_set = true;
+                    }
                 }
 
                 let frame = frame_writer.finalize();
@@ -508,14 +543,14 @@ impl Endpoint {
         }
     }
 
-    pub fn flush<C>(&mut self, ctx: &mut C)
+    pub fn flush<C>(&mut self, now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
-        self.actual_flush(false, false, ctx);
+        self.actual_flush(false, false, now_ms, ctx);
     }
 
-    pub fn disconnect<C>(&mut self, _ctx: &mut C)
+    pub fn disconnect<C>(&mut self, _now_ms: u64, _ctx: &mut C)
     where
         C: HostContext,
     {
@@ -569,6 +604,6 @@ mod tests {
         let mut host_ctx = MockHostContext::new();
         let mut endpoint = Endpoint::new();
 
-        endpoint.actual_flush(true, true, &mut host_ctx);
+        endpoint.actual_flush(true, true, 0, &mut host_ctx);
     }
 }
