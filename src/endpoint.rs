@@ -112,6 +112,8 @@ impl FrameTxWindow {
     }
 }
 
+const SATURATION_MAX: i32 = 1_000_000;
+
 struct TxPrioState {
     counter: i32,
     w_r: u8,
@@ -120,8 +122,7 @@ struct TxPrioState {
     sat_u: i32,
 }
 
-const SATURATION_MAX: i32 = 1_000_000;
-
+#[derive(PartialEq)]
 enum SendModeType {
     Unreliable,
     Reliable,
@@ -144,7 +145,7 @@ impl TxPrioState {
         }
     }
 
-    pub fn next_mode(&mut self) -> SendModeType {
+    pub fn next_mode(&self) -> SendModeType {
         if self.counter >= 0 {
             SendModeType::Unreliable
         } else {
@@ -173,24 +174,113 @@ impl TxPrioState {
     }
 }
 
+struct FragmentTxBuffers {
+    unrel: buffer::UnreliableTxBuffer,
+    rel: buffer::ReliableTxBuffer,
+    prio_state: TxPrioState,
+}
+
+impl FragmentTxBuffers {
+    pub fn new(window_base_id: u32, window_size: u32, fragment_size: usize) -> Self {
+        Self {
+            unrel: buffer::UnreliableTxBuffer::new(window_base_id, window_size, fragment_size),
+            rel: buffer::ReliableTxBuffer::new(window_base_id, window_size, fragment_size),
+            prio_state: TxPrioState::new(1, 2, 10_000, 20_000),
+        }
+    }
+
+    pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+        match mode {
+            SendMode::Reliable => {
+                self.rel.push(packet_bytes);
+            }
+            SendMode::Unreliable(_timeout_ms) => {
+                self.unrel.push(packet_bytes);
+            }
+        }
+    }
+
+    pub fn acknowledge(&mut self, unrel_id: Option<u32>, rel_id: Option<u32>) {
+        if let Some(unrel_id) = unrel_id {
+            self.unrel.acknowledge(unrel_id);
+        }
+
+        if let Some(rel_id) = rel_id {
+            self.rel.acknowledge(rel_id);
+        }
+    }
+
+    pub fn data_ready(&self) -> bool {
+        self.unrel.peek_sendable().is_some() || self.rel.peek_sendable().is_some()
+    }
+
+    pub fn flush(&mut self, writer: &mut frame::serial::FrameWriter) -> usize {
+        let mut data_size_total = 0;
+
+        loop {
+            let unrel_fragment = self.unrel.peek_sendable();
+            let rel_fragment = self.rel.peek_sendable();
+
+            let (fragment, mode) = if unrel_fragment.is_some() && rel_fragment.is_some() {
+                match self.prio_state.next_mode() {
+                    SendModeType::Unreliable => (unrel_fragment, SendModeType::Unreliable),
+                    SendModeType::Reliable => (rel_fragment, SendModeType::Reliable),
+                }
+            } else if unrel_fragment.is_some() {
+                (unrel_fragment, SendModeType::Unreliable)
+            } else if rel_fragment.is_some() {
+                (rel_fragment, SendModeType::Reliable)
+            } else {
+                break;
+            };
+
+            let fragment = fragment.unwrap();
+
+            let datagram = frame::Datagram {
+                id: fragment.id,
+                unrel: mode == SendModeType::Unreliable,
+                first: fragment.first,
+                last: fragment.last,
+                data: &fragment.data[fragment.data_range.clone()],
+            };
+
+            if writer.write(&datagram) {
+                let data_size = datagram.data.len();
+
+                self.prio_state.mark_sent(data_size);
+                data_size_total += data_size;
+
+                match mode {
+                    SendModeType::Unreliable => {
+                        self.unrel.pop_sendable().expect("NANI?");
+                    }
+                    SendModeType::Reliable => {
+                        self.rel.pop_sendable().expect("NANI?");
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        // TODO: Include size of datagram headers here
+        return data_size_total;
+    }
+}
+
 pub struct Endpoint {
+    // Sender state
     tx_window: FrameTxWindow,
-    segment_rx_buffer: buffer::SegmentRxBuffer,
+    tx_data: FragmentTxBuffers,
 
     cwnd: usize,
 
-    prio_state: TxPrioState,
-
-    unreliable_tx: buffer::UnreliableTxBuffer,
-    unreliable_rx: buffer::UnreliableRxBuffer,
-
-    reliable_tx: buffer::ReliableTxBuffer,
-    reliable_rx: buffer::ReliableRxBuffer,
-
-    u_total: usize,
-    r_total: usize,
-
     tx_buffer: [u8; 1478],
+
+    // Receiver state
+    segment_rx_buffer: buffer::SegmentRxBuffer,
+    unreliable_rx: buffer::UnreliableRxBuffer,
+    reliable_rx: buffer::ReliableRxBuffer,
 }
 
 impl Endpoint {
@@ -200,21 +290,12 @@ impl Endpoint {
 
         Self {
             tx_window: FrameTxWindow::new(0, 20),
-            segment_rx_buffer: buffer::SegmentRxBuffer::new(0, 20, fragment_size),
+            tx_data: FragmentTxBuffers::new(0, fragment_window_size, fragment_size),
             cwnd: 15000,
-
-            prio_state: TxPrioState::new(1, 2, 10_000, 20_000),
-
-            unreliable_tx: buffer::UnreliableTxBuffer::new(0, fragment_window_size, fragment_size),
-            unreliable_rx: buffer::UnreliableRxBuffer::new(0, fragment_window_size, fragment_size),
-
-            reliable_tx: buffer::ReliableTxBuffer::new(0, fragment_window_size, fragment_size),
-            reliable_rx: buffer::ReliableRxBuffer::new(0, fragment_size),
-
-            u_total: 0,
-            r_total: 0,
-
             tx_buffer: [0; 1478],
+            segment_rx_buffer: buffer::SegmentRxBuffer::new(0, 20, fragment_size),
+            unreliable_rx: buffer::UnreliableRxBuffer::new(0, fragment_window_size, fragment_size),
+            reliable_rx: buffer::ReliableRxBuffer::new(0, fragment_size),
         }
     }
 
@@ -232,14 +313,7 @@ impl Endpoint {
     where
         C: HostContext,
     {
-        match mode {
-            SendMode::Reliable => {
-                self.reliable_tx.push(packet_bytes);
-            }
-            SendMode::Unreliable(_timeout_ms) => {
-                self.unreliable_tx.push(packet_bytes);
-            }
-        }
+        self.tx_data.enqueue(packet_bytes, mode);
 
         self.actual_flush(false, false, ctx);
     }
@@ -266,13 +340,7 @@ impl Endpoint {
             if let Some(stream_ack) = frame_reader.read::<frame::StreamAck>() {
                 self.tx_window.acknowledge(stream_ack.data_id);
 
-                if let Some(unrel_id) = stream_ack.unrel_id {
-                    self.unreliable_tx.acknowledge(unrel_id);
-                }
-
-                if let Some(rel_id) = stream_ack.rel_id {
-                    self.reliable_tx.acknowledge(rel_id);
-                }
+                self.tx_data.acknowledge(stream_ack.unrel_id, stream_ack.rel_id);
             }
         }
 
@@ -354,7 +422,7 @@ impl Endpoint {
     {
         let mut send_ack = ack_unrel || ack_rel;
 
-        'frame_loop: loop {
+        loop {
             /*
             println!(
                 "U Total: {}  R Total: {}  U/R Ratio: {}",
@@ -366,9 +434,7 @@ impl Endpoint {
 
             let frame_window_limited = !self.tx_window.can_send();
             let congestion_window_limited = self.tx_window.bytes_in_transit() >= self.cwnd;
-            let unrel_data_ready = self.unreliable_tx.peek_sendable().is_some();
-            let rel_data_ready = self.reliable_tx.peek_sendable().is_some();
-            let data_ready = unrel_data_ready | rel_data_ready;
+            let data_ready = self.tx_data.data_ready();
 
             let send_data = !frame_window_limited && !congestion_window_limited && data_ready;
 
@@ -426,99 +492,18 @@ impl Endpoint {
 
                     frame_writer.write(&header);
 
-                    let mut data_size_total = 0;
+                    let size_written = self.tx_data.flush(&mut frame_writer);
 
-                    'outer: loop {
-                        let order = match self.prio_state.next_mode() {
-                            SendModeType::Unreliable => {
-                                [SendModeType::Unreliable, SendModeType::Reliable]
-                            }
-                            SendModeType::Reliable => {
-                                [SendModeType::Reliable, SendModeType::Unreliable]
-                            }
-                        };
+                    debug_assert!(size_written > 0);
 
-                        let mut no_data = true;
-
-                        'inner: for mode in order {
-                            match mode {
-                                SendModeType::Unreliable => {
-                                    if let Some(fragment) = self.unreliable_tx.peek_sendable() {
-                                        let size = fragment.data_range.len();
-
-                                        let datagram = frame::Datagram {
-                                            id: fragment.id,
-                                            unrel: true,
-                                            first: fragment.first,
-                                            last: fragment.last,
-                                            data: &fragment.data[fragment.data_range.clone()],
-                                        };
-
-                                        if !frame_writer.write(&datagram) {
-                                            // Frame finished, send what we have
-                                            break 'outer;
-                                        }
-
-                                        self.unreliable_tx.pop_sendable().expect("NANI?");
-
-                                        self.prio_state.mark_sent(size);
-                                        self.u_total += size;
-                                        data_size_total += size;
-                                        no_data = false;
-
-                                        // println!("U {size}");
-
-                                        // Query prio state before sending next fragment
-                                        break 'inner;
-                                    }
-                                }
-                                SendModeType::Reliable => {
-                                    if let Some(fragment) = self.reliable_tx.peek_sendable() {
-                                        let size = fragment.data_range.len();
-
-                                        let datagram = frame::Datagram {
-                                            id: fragment.id,
-                                            unrel: false,
-                                            first: fragment.first,
-                                            last: fragment.last,
-                                            data: &fragment.data[fragment.data_range.clone()],
-                                        };
-
-                                        if !frame_writer.write(&datagram) {
-                                            // Frame finished, send what we have
-                                            break 'outer;
-                                        }
-
-                                        self.reliable_tx.pop_sendable().expect("NANI?");
-
-                                        self.prio_state.mark_sent(size);
-                                        self.r_total += size;
-                                        data_size_total += size;
-                                        no_data = false;
-
-                                        // println!("R {size}");
-
-                                        // Query prio state before sending next fragment
-                                        break 'inner;
-                                    }
-                                }
-                            }
-                        }
-
-                        if no_data {
-                            // No more data to be sent
-                            break 'outer;
-                        }
-                    }
-
-                    self.tx_window.mark_sent(data_size_total);
+                    self.tx_window.mark_sent(size_written);
                 }
 
                 let frame = frame_writer.finalize();
 
                 ctx.send_frame(frame);
             } else {
-                break 'frame_loop;
+                break;
             }
         }
     }
