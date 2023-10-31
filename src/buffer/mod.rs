@@ -47,10 +47,7 @@ impl<'a> From<&'a FragmentRc> for FragmentRef<'a> {
 }
 
 mod reliable;
-mod segment;
 mod unreliable;
-
-pub use segment::RxBuffer as SegmentRxBuffer;
 
 pub use unreliable::RxBuffer as UnreliableRxBuffer;
 pub use unreliable::TxBuffer as UnreliableTxBuffer;

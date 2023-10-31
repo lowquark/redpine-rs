@@ -2,6 +2,7 @@ use super::buffer;
 use super::frame;
 use super::SendMode;
 
+mod segment_rx;
 mod segment_tx;
 
 #[derive(Clone, Copy, Debug)]
@@ -205,7 +206,7 @@ pub struct Endpoint {
     rto_timer_set: bool,
 
     // Receiver state
-    segment_rx_buffer: buffer::SegmentRxBuffer,
+    segment_rx_buffer: segment_rx::SegmentRx,
     unreliable_rx: buffer::UnreliableRxBuffer,
     reliable_rx: buffer::ReliableRxBuffer,
 }
@@ -222,7 +223,7 @@ impl Endpoint {
             cwnd: 15000,
             tx_buffer: [0; 1478],
             rto_timer_set: false,
-            segment_rx_buffer: buffer::SegmentRxBuffer::new(0, segment_window_size, fragment_size),
+            segment_rx_buffer: segment_rx::SegmentRx::new(0, segment_window_size, fragment_size),
             unreliable_rx: buffer::UnreliableRxBuffer::new(0, fragment_window_size, fragment_size),
             reliable_rx: buffer::ReliableRxBuffer::new(0, fragment_size),
         }

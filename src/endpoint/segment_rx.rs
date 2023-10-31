@@ -1,4 +1,4 @@
-use super::Window;
+use crate::buffer::Window;
 
 struct Slot {
     id: u32,
@@ -6,7 +6,7 @@ struct Slot {
     len: usize,
 }
 
-pub struct RxBuffer {
+pub struct SegmentRx {
     window: Window,
 
     slot_0: Slot,
@@ -14,7 +14,7 @@ pub struct RxBuffer {
     len: u8,
 }
 
-impl RxBuffer {
+impl SegmentRx {
     pub fn new(window_base_id: u32, window_size: u32, segment_size_max: usize) -> Self {
         Self {
             window: Window::new(window_base_id, window_size),
