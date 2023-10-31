@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use super::buffer;
 use super::frame;
 use super::SendMode;
@@ -35,44 +33,50 @@ pub trait HostContext {
     fn on_timeout(&mut self);
 }
 
-struct SegmentTxWindow {
-    //   base    next    base+size
-    //   v       v       v
-    // --########________--------> frame IDs
-    //
-    // #: in transit
-    // _: sendable
+//            base    next    base+size
+//            v       v       v
+// -----------########________--------> frame IDs
+// *********_*
+// ack history
+//
+// *: acknowledged
+// #: in transit
+// _: sendable
+
+struct SegmentTx {
     base_id: u32,
     next_id: u32,
     size: u32,
 
-    // sizes of [base, next)
-    transit_buf: VecDeque<usize>, // TODO: Static buffer
+    // Ring buffer of segment sizes corresponding to [base, next)
+    transit_buf: Box<[usize]>,
+    transit_buf_mask: u32,
+
+    // Sum of sizes in transit_buf
     transit_total: usize,
 
+    // Bitfield representing segments acknowledged by receiver
     ack_history: u32,
 }
 
-impl SegmentTxWindow {
+impl SegmentTx {
     pub fn new(base_id: u32, size: u32) -> Self {
+        assert!(
+            size > 0 && (size - 1) & size == 0,
+            "size must be a power of two"
+        );
+
         Self {
             base_id,
             next_id: base_id,
             size,
 
-            transit_buf: VecDeque::new(),
+            transit_buf: vec![0; size as usize].into(),
+            transit_buf_mask: size - 1,
             transit_total: 0,
 
             ack_history: u32::MAX,
         }
-    }
-
-    fn delta(&self, segment_id: u32) -> u32 {
-        segment_id.wrapping_sub(self.base_id)
-    }
-
-    fn next_delta(&self) -> u32 {
-        self.next_id.wrapping_sub(self.base_id)
     }
 
     pub fn next_id(&self) -> u32 {
@@ -80,15 +84,17 @@ impl SegmentTxWindow {
     }
 
     pub fn can_send(&self) -> bool {
-        self.delta(self.next_id) < self.size
+        self.next_id.wrapping_sub(self.base_id) < self.size
     }
 
     pub fn mark_sent(&mut self, size: usize) {
-        assert!(self.can_send());
+        debug_assert!(self.can_send());
+
+        let idx = (self.next_id & self.transit_buf_mask) as usize;
+        self.transit_buf[idx] = size;
+        self.transit_total += size;
 
         self.next_id = self.next_id.wrapping_add(1);
-        self.transit_buf.push_back(size);
-        self.transit_total += size;
     }
 
     pub fn bytes_in_transit(&self) -> usize {
@@ -102,22 +108,22 @@ impl SegmentTxWindow {
         rx_history: u32,
         _rx_history_nonce: bool,
     ) -> bool {
-        let ack_delta = self.delta(rx_base_id);
+        let ack_delta = rx_base_id.wrapping_sub(self.base_id);
 
         // The delta ack must not exceed the next ID to be sent, else it is invalid
-        if ack_delta <= self.delta(self.next_id) {
+        if ack_delta <= self.next_id.wrapping_sub(self.base_id) {
             if ack_delta > 0 {
-                // Advance the segment tx window
-                self.base_id = rx_base_id;
-
                 // Anything between the current base_id and the acknowledged base_id has very likely
                 // left the network; subtract from running total
-                for size in self
-                    .transit_buf
-                    .drain(0..usize::try_from(ack_delta).unwrap())
-                {
+                for i in 0..ack_delta {
+                    let idx = (self.base_id.wrapping_add(i) & self.transit_buf_mask) as usize;
+                    let size = self.transit_buf[idx];
+
                     self.transit_total -= size;
                 }
+
+                // Advance the segment tx window
+                self.base_id = rx_base_id;
             }
 
             // This history queue incrementally tracks acknowledged segments from the receiver
@@ -131,7 +137,7 @@ impl SegmentTxWindow {
             // xxxxxxxx xxxxxxxx xx000000 00000000   self.ack_history
             //                     000000 000yyyyy   rx_history
 
-            let N = u32::BITS;
+            const N: u32 = u32::BITS;
 
             if ack_delta > self.ack_history.leading_ones() {
                 // Shifting would cause a zero to be >32 bits behind, that's a drop
@@ -194,7 +200,7 @@ mod tests2 {
 
     #[test]
     fn send_receive_window() {
-        let mut tx = SegmentTxWindow::new(0, 128);
+        let mut tx = SegmentTx::new(0, 128);
 
         for i in 0..128 {
             assert_eq!(tx.can_send(), true);
@@ -212,8 +218,8 @@ mod tests2 {
         }
     }
 
-    fn new_filled_window(size: usize) -> SegmentTxWindow {
-        let mut tx = SegmentTxWindow::new(0, 128);
+    fn new_filled_window(size: usize) -> SegmentTx {
+        let mut tx = SegmentTx::new(0, 128);
 
         for _ in 0..size {
             tx.mark_sent(0);
@@ -453,7 +459,7 @@ const RESEND_TIMEOUT_MS: u64 = 3000;
 
 pub struct Endpoint {
     // Sender state
-    segment_tx_window: SegmentTxWindow,
+    segment_tx: SegmentTx,
     tx_data: FragmentTxBuffers,
 
     cwnd: usize,
@@ -475,7 +481,7 @@ impl Endpoint {
         let segment_window_size = 128;
 
         Self {
-            segment_tx_window: SegmentTxWindow::new(0, segment_window_size),
+            segment_tx: SegmentTx::new(0, segment_window_size),
             tx_data: FragmentTxBuffers::new(0, fragment_window_size, fragment_size),
             cwnd: 15000,
             tx_buffer: [0; 1478],
@@ -523,10 +529,7 @@ impl Endpoint {
 
         if read_ack {
             if let Some(stream_ack) = frame_reader.read::<frame::StreamAck>() {
-                if self
-                    .segment_tx_window
-                    .acknowledge(stream_ack.data_id, 0x1F, false)
-                {
+                if self.segment_tx.acknowledge(stream_ack.data_id, 0x1F, false) {
                     println!("drop detected");
                 }
 
@@ -534,7 +537,7 @@ impl Endpoint {
                     .acknowledge(stream_ack.unrel_id, stream_ack.rel_id);
 
                 if self.rto_timer_set {
-                    if stream_ack.data_id == self.segment_tx_window.next_id() {
+                    if stream_ack.data_id == self.segment_tx.next_id() {
                         // All caught up
                         ctx.unset_timer(TimerName::Rto);
                         self.rto_timer_set = false;
@@ -649,8 +652,8 @@ impl Endpoint {
             );
             */
 
-            let frame_window_limited = !self.segment_tx_window.can_send();
-            let congestion_window_limited = self.segment_tx_window.bytes_in_transit() >= self.cwnd;
+            let frame_window_limited = !self.segment_tx.can_send();
+            let congestion_window_limited = self.segment_tx.bytes_in_transit() >= self.cwnd;
             let data_ready = self.tx_data.data_ready();
 
             let send_data = !frame_window_limited && !congestion_window_limited && data_ready;
@@ -704,7 +707,7 @@ impl Endpoint {
 
                 if send_data {
                     let header = frame::StreamDataHeader {
-                        id: self.segment_tx_window.next_id(),
+                        id: self.segment_tx.next_id(),
                     };
 
                     frame_writer.write(&header);
@@ -713,7 +716,7 @@ impl Endpoint {
 
                     debug_assert!(size_written > 0);
 
-                    self.segment_tx_window.mark_sent(size_written);
+                    self.segment_tx.mark_sent(size_written);
 
                     // Acks are expected, set the resend timeout if not already
                     if !self.rto_timer_set {
