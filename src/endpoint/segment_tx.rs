@@ -70,7 +70,7 @@ impl SegmentTx {
         let bit_idx = self.next_id % 64;
         let bit_mask = 1u64 << (63 - bit_idx);
 
-        let ref mut bitfield = self.nonce_buf[idx as usize];
+        let ref mut bitfield = self.nonce_buf[(idx & self.nonce_buf_mask) as usize];
 
         if nonce {
             *bitfield |= bit_mask;
@@ -314,6 +314,64 @@ mod tests {
             assert_eq!(tx.bytes_in_transit(), ((128 - i - 1) * 5) as usize);
             assert_eq!(tx.can_send(), true);
         }
+    }
+
+    #[test]
+    fn ideal_nonce_verification() {
+        for n in 1..7 {
+            let initial_id = u32::MAX - 1024;
+            let mut tx = SegmentTx::new(initial_id, 1024);
+
+            let mut i = 0;
+
+            while i < 2048 {
+                let id = initial_id.wrapping_add(i);
+
+                assert_eq!(tx.next_id(), id);
+
+                let mut nonces = [false; 7];
+
+                for j in 0..n {
+                    nonces[j] = tx.compute_next_nonce();
+                    tx.mark_sent(0);
+                }
+
+                let rx_history = (1 << n) - 1;
+
+                let mut rx_history_nonce = false;
+
+                for j in 0..n {
+                    rx_history_nonce ^= nonces[j];
+                }
+
+                let rx_base_id = id.wrapping_add(n as u32);
+
+                assert_eq!(
+                    tx.acknowledge(rx_base_id, rx_history as u32, rx_history_nonce),
+                    false
+                );
+
+                i = rx_base_id;
+            }
+        }
+    }
+
+    #[test]
+    fn bad_nonce_verification() {
+        let mut tx = SegmentTx::new(0, 1024);
+
+        let mut nonces = [false; 24];
+        for i in 0..24 {
+            nonces[i] = tx.compute_next_nonce();
+            tx.mark_sent(0);
+        }
+
+        let bad_nonce = !(nonces[0] ^ nonces[1] ^ nonces[2]);
+
+        assert_eq!(tx.acknowledge(3, 0b111, bad_nonce), false);
+        assert_eq!(tx.acknowledge(4, 0b1, nonces[3]), false);
+        assert_eq!(tx.acknowledge(5, 0b1, nonces[4]), false);
+        assert_eq!(tx.acknowledge(6, 0b1, nonces[5]), true);
     }
 
     fn new_filled_window(size: usize) -> SegmentTx {

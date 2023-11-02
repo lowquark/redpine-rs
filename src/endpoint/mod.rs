@@ -294,8 +294,11 @@ impl Endpoint {
                 let data_id = stream_data_header.id;
                 let data_bytes = frame_reader.remaining_bytes();
 
-                self.segment_rx_buffer
-                    .receive(data_id, data_bytes, |stream_data: &[u8]| {
+                self.segment_rx_buffer.receive(
+                    data_id,
+                    false,
+                    data_bytes,
+                    |stream_data: &[u8]| {
                         let mut frame_reader = frame::serial::EzReader::new(stream_data);
 
                         while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
@@ -322,7 +325,8 @@ impl Endpoint {
                                 ack_rel = true;
                             }
                         }
-                    });
+                    },
+                );
 
                 // TODO: Set the receive timer if there are frames in the receive buffer
             }

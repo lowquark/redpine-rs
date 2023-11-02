@@ -2,6 +2,7 @@ use crate::buffer::Window;
 
 struct Slot {
     id: u32,
+    nonce: bool,
     data: Box<[u8]>,
     len: usize,
 }
@@ -12,6 +13,9 @@ pub struct SegmentRx {
     slot_0: Slot,
     slot_1: Slot,
     len: u8,
+
+    ack_history: u32,
+    nonce_history: u32,
 }
 
 impl SegmentRx {
@@ -20,29 +24,70 @@ impl SegmentRx {
             window: Window::new(window_base_id, window_size),
             slot_0: Slot {
                 id: 0,
+                nonce: false,
                 data: (0..segment_size_max).map(|_| 0).collect::<Vec<_>>().into(),
                 len: 0,
             },
             slot_1: Slot {
                 id: 0,
+                nonce: false,
                 data: (0..segment_size_max).map(|_| 0).collect::<Vec<_>>().into(),
                 len: 0,
             },
             len: 0,
+
+            ack_history: 0,
+            nonce_history: 0,
         }
+    }
+
+    fn save_segment(slot: &mut Slot, id: u32, nonce: bool, data: &[u8]) {
+        slot.id = id;
+        slot.nonce = nonce;
+        slot.data[..data.len()].copy_from_slice(data);
+        slot.len = data.len();
+    }
+
+    fn swap_slots(&mut self) {
+        debug_assert_eq!(self.len, 2);
+
+        std::mem::swap(&mut self.slot_0, &mut self.slot_1);
     }
 
     fn swap_slots_if_backward(&mut self) {
         debug_assert_eq!(self.len, 2);
 
-        if self.slot_0.id.wrapping_sub(self.window.base_id)
-            > self.slot_1.id.wrapping_sub(self.window.base_id)
-        {
-            std::mem::swap(&mut self.slot_0, &mut self.slot_1);
+        let slot_0_delta = self.slot_0.id.wrapping_sub(self.window.base_id);
+        let slot_1_delta = self.slot_1.id.wrapping_sub(self.window.base_id);
+
+        if slot_0_delta > slot_1_delta {
+            self.swap_slots();
         }
     }
 
-    pub fn receive<F>(&mut self, new_id: u32, new_data: &[u8], mut cb: F) -> u8
+    fn push_history_ack(&mut self, nonce: bool) {
+        self.ack_history <<= 1;
+        self.nonce_history <<= 1;
+
+        self.ack_history |= 0b1;
+        self.nonce_history |= nonce as u32;
+    }
+
+    fn push_history_skips(&mut self, count: u32) {
+        if count < 32 {
+            self.ack_history <<= count;
+            self.nonce_history <<= count;
+        } else {
+            self.ack_history = 0;
+            self.nonce_history = 0;
+        }
+    }
+
+    fn advance_window_past(&mut self, new_base_id: u32) {
+        self.window.base_id = new_base_id.wrapping_add(1);
+    }
+
+    pub fn receive<F>(&mut self, new_id: u32, new_nonce: bool, new_data: &[u8], mut cb: F) -> u8
     where
         F: FnMut(&[u8]),
     {
@@ -51,59 +96,71 @@ impl SegmentRx {
             if new_id == self.window.base_id {
                 // This segment is expected next, deliver
                 cb(new_data);
-                self.window.base_id = self.window.base_id.wrapping_add(1);
+                self.push_history_ack(new_nonce);
+                self.advance_window_past(new_id);
             } else {
                 if self.len == 0 {
                     // Add segment to empty buffer
-                    self.slot_0.id = new_id;
-                    self.slot_0.data[..new_data.len()].copy_from_slice(new_data);
-                    self.slot_0.len = new_data.len();
+                    Self::save_segment(&mut self.slot_0, new_id, new_nonce, new_data);
 
                     self.len = 1;
+                    return self.len;
                 } else if self.len == 1 {
                     // Add segment to buffer if unique
                     if self.slot_0.id != new_id {
-                        self.slot_1.id = new_id;
-                        self.slot_1.data[..new_data.len()].copy_from_slice(new_data);
-                        self.slot_1.len = new_data.len();
+                        Self::save_segment(&mut self.slot_1, new_id, new_nonce, new_data);
 
                         self.len = 2;
 
                         self.swap_slots_if_backward();
                     }
+
+                    return self.len;
                 } else if self.len == 2 {
                     // Push & pop segments if unique
                     if self.slot_0.id != new_id && self.slot_1.id != new_id {
-                        if new_id.wrapping_sub(self.window.base_id)
-                            < self.slot_0.id.wrapping_sub(self.window.base_id)
-                        {
-                            // The latest segment is the newest of the three, deliver
+                        let new_delta = new_id.wrapping_sub(self.window.base_id);
+                        let slot_0_delta = self.slot_0.id.wrapping_sub(self.window.base_id);
+
+                        if new_delta < slot_0_delta {
+                            // The latest segment is the newest of the three
                             // (This skips unreceived segments)
                             cb(new_data);
-                            self.window.base_id = new_id.wrapping_add(1);
-                        } else {
-                            // The first segment in the buffer is the newest of the three, deliver
-                            // (This skips unreceived segments)
-                            cb(&self.slot_0.data[..self.slot_0.len]);
-                            self.window.base_id = self.slot_0.id.wrapping_add(1);
 
-                            self.slot_0.id = new_id;
-                            self.slot_0.data[..new_data.len()].copy_from_slice(new_data);
-                            self.slot_0.len = new_data.len();
+                            self.push_history_skips(new_delta);
+                            self.push_history_ack(new_nonce);
+                            self.advance_window_past(new_id);
+                        } else {
+                            // The first segment in the buffer is the newest of the three
+                            // (This skips unreceived segments)
+
+                            let slot_0_data = &self.slot_0.data[..self.slot_0.len];
+                            cb(slot_0_data);
+
+                            self.push_history_skips(slot_0_delta);
+                            self.push_history_ack(self.slot_0.nonce);
+                            self.advance_window_past(self.slot_0.id);
+
+                            Self::save_segment(&mut self.slot_0, new_id, new_nonce, new_data);
 
                             self.swap_slots_if_backward();
                         }
                     }
+                } else {
+                    panic!("invalid buffer length")
                 }
             }
 
             // Deliver all segments in the buffer which match the next expected ID
             while self.len > 0 && self.slot_0.id == self.window.base_id {
-                cb(&self.slot_0.data[..self.slot_0.len]);
-                self.window.base_id = self.window.base_id.wrapping_add(1);
+                let slot_0_data = &self.slot_0.data[..self.slot_0.len];
+                cb(slot_0_data);
+
+                self.push_history_ack(self.slot_0.nonce);
+                self.advance_window_past(self.slot_0.id);
 
                 if self.len == 2 {
-                    std::mem::swap(&mut self.slot_0, &mut self.slot_1);
+                    self.swap_slots();
                 }
 
                 self.len -= 1;
@@ -115,5 +172,195 @@ impl SegmentRx {
 
     pub fn next_expected_id(&self) -> u32 {
         self.window.base_id
+    }
+
+    fn compute_nonce_checksum(ack_history: u8, nonce_history: u8) -> bool {
+        let mut x = ack_history & nonce_history;
+        x ^= x >> 4;
+        x ^= x >> 2;
+        x ^= x >> 1;
+        x & 0b1 == 0b1
+    }
+
+    pub fn next_ack_info(&self) -> (u8, bool) {
+        let ack_history = self.ack_history as u8;
+        let nonce_history = self.nonce_history as u8;
+
+        (
+            ack_history,
+            Self::compute_nonce_checksum(ack_history, nonce_history),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashMap;
+
+    fn test(rounds: &[(u8, Box<[u8]>, u8, u8)]) {
+        let mut nonces = HashMap::new();
+
+        let mut rx = SegmentRx::new(0, 128, 1500);
+
+        for round in rounds.into_iter() {
+            let id = round.0 as u32;
+
+            // Generate a random nonce for this segment, save for later
+            let nonce = rand::random::<bool>();
+            if !nonces.contains_key(&id) {
+                nonces.insert(id, nonce);
+            }
+
+            // A u8 ID is used so that it fits into a single byte
+            let ref data = [id as u8];
+
+            // Track all received packets
+            let mut recv_buffer = Vec::new();
+
+            let mut handler = |data: &[u8]| {
+                recv_buffer.push(data[0]);
+            };
+
+            // Actually call receive
+            rx.receive(id, nonce, data, &mut handler);
+
+            let next_id = rx.next_expected_id();
+            let (ack_history, nonce_checksum) = rx.next_ack_info();
+
+            // Test handled segments
+            assert_eq!(recv_buffer, round.1.clone().into_vec());
+            recv_buffer.clear();
+
+            // Reported receive window base ID should match
+            assert_eq!(next_id, round.2 as u32);
+
+            // Reported ack history should match
+            assert_eq!(ack_history, round.3);
+
+            // Reported nonce checksum should match manually computed value
+            let mut checksum = false;
+            for i in 0..8 {
+                if ack_history & (1 << i) != 0 {
+                    let acked_id = next_id.wrapping_sub(1).wrapping_sub(i) as u32;
+                    checksum ^= nonces[&acked_id];
+                }
+            }
+            assert_eq!(nonce_checksum, checksum);
+        }
+    }
+
+    #[test]
+    fn sequential_receive() {
+        let ref rounds = [
+            (0, vec![0].into(), 1, 0b00001),
+            (1, vec![1].into(), 2, 0b00011),
+            (2, vec![2].into(), 3, 0b00111),
+            (3, vec![3].into(), 4, 0b01111),
+            (4, vec![4].into(), 5, 0b11111),
+        ];
+
+        test(rounds);
+    }
+
+    #[test]
+    fn nonsequential_receive() {
+        let ref rounds = [
+            (0, vec![0].into(), 1, 0b00001),
+            (2, vec![].into(), 1, 0b00001),
+            (1, vec![1, 2].into(), 3, 0b00111),
+            (3, vec![3].into(), 4, 0b01111),
+            (4, vec![4].into(), 5, 0b11111),
+        ];
+
+        test(rounds);
+
+        let ref rounds = [
+            (0, vec![0].into(), 1, 0b00001),
+            (3, vec![].into(), 1, 0b00001),
+            (2, vec![].into(), 1, 0b00001),
+            (1, vec![1, 2, 3].into(), 4, 0b01111),
+            (4, vec![4].into(), 5, 0b11111),
+        ];
+
+        test(rounds);
+
+        let ref rounds = [
+            (0, vec![0].into(), 1, 0b00001),
+            (2, vec![].into(), 1, 0b00001),
+            (3, vec![].into(), 1, 0b00001),
+            (1, vec![1, 2, 3].into(), 4, 0b01111),
+            (4, vec![4].into(), 5, 0b11111),
+        ];
+
+        test(rounds);
+
+        let ref rounds = [
+            (0, vec![0].into(), 1, 0b00001),
+            (2, vec![].into(), 1, 0b00001),
+            (4, vec![].into(), 1, 0b00001),
+            (1, vec![1, 2].into(), 3, 0b00111),
+            (3, vec![3, 4].into(), 5, 0b11111),
+        ];
+
+        test(rounds);
+    }
+
+    #[test]
+    fn skips() {
+        let ref rounds = [
+            (0, vec![0].into(), 1, 0b00001),
+            (2, vec![].into(), 1, 0b00001),
+            (3, vec![].into(), 1, 0b00001),
+            (4, vec![2, 3, 4].into(), 5, 0b10111),
+        ];
+
+        test(rounds);
+
+        let ref rounds = [
+            (0, vec![0].into(), 1, 0b00001),
+            (2, vec![].into(), 1, 0b00001),
+            (4, vec![].into(), 1, 0b00001),
+            (6, vec![2].into(), 3, 0b00101),
+            (5, vec![4, 5, 6].into(), 7, 0b1010111),
+        ];
+
+        test(rounds);
+
+        let ref rounds = [
+            (20, vec![].into(), 0, 0b00000),
+            (50, vec![].into(), 0, 0b00000),
+            (60, vec![20].into(), 21, 0b00001),
+            (70, vec![50].into(), 51, 0b00001),
+        ];
+
+        test(rounds);
+    }
+
+    #[test]
+    fn beyond_window() {
+        let ref rounds = [
+            (127, vec![].into(), 0, 0b00000),
+            (128, vec![].into(), 0, 0b00000),
+            (129, vec![].into(), 0, 0b00000),
+        ];
+
+        test(rounds);
+    }
+
+    #[test]
+    fn dup_rejection() {
+        let ref rounds = [
+            (1, vec![].into(), 0, 0b00000),
+            (1, vec![].into(), 0, 0b00000),
+            (1, vec![].into(), 0, 0b00000),
+            (2, vec![].into(), 0, 0b00000),
+            (1, vec![].into(), 0, 0b00000),
+            (2, vec![].into(), 0, 0b00000),
+            (0, vec![0, 1, 2].into(), 3, 0b00111),
+        ];
+
+        test(rounds);
     }
 }
