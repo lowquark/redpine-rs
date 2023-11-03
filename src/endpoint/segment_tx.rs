@@ -366,12 +366,45 @@ mod tests {
             tx.mark_sent(0);
         }
 
-        let bad_nonce = !(nonces[0] ^ nonces[1] ^ nonces[2]);
+        let checksum_0_2_bad = !(nonces[0] ^ nonces[1] ^ nonces[2]);
 
-        assert_eq!(tx.acknowledge(3, 0b111, bad_nonce), false);
+        assert_eq!(tx.acknowledge(3, 0b111, checksum_0_2_bad), false);
         assert_eq!(tx.acknowledge(4, 0b1, nonces[3]), false);
         assert_eq!(tx.acknowledge(5, 0b1, nonces[4]), false);
         assert_eq!(tx.acknowledge(6, 0b1, nonces[5]), true);
+    }
+
+    #[test]
+    fn full_window_nonce_verification() {
+        let mut tx = SegmentTx::new(0, 1024);
+        let mut nonces = [false; 9];
+
+        // Fill window
+        for i in 0..1024 {
+            if i < nonces.len() {
+                nonces[i] = tx.compute_next_nonce();
+            }
+            tx.mark_sent(0);
+        }
+
+        // Ack 3 segments
+        let checksum_0_2 = nonces[0] ^ nonces[1] ^ nonces[2];
+        assert_eq!(tx.acknowledge(3, 0b111, checksum_0_2), false);
+
+        // Fill window again
+        for i in 0..3 {
+            tx.compute_next_nonce();
+            tx.mark_sent(0);
+        }
+
+        // Old nonce history must be preserved, despite window having lapsed it
+        let checksum_0_5 = checksum_0_2 ^ nonces[3] ^ nonces[4] ^ nonces[5];
+        assert_eq!(tx.acknowledge(6, 0b111111, checksum_0_5), false);
+
+        // This will produce a drop if previous ack is rejected (very likely if nonce history is
+        // not preserved correctly)
+        let checksum_6_8 = nonces[6] ^ nonces[7] ^ nonces[8];
+        assert_eq!(tx.acknowledge(9, 0b111, checksum_6_8), false);
     }
 
     fn new_filled_window(size: usize) -> SegmentTx {
