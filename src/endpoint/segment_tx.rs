@@ -175,7 +175,7 @@ impl SegmentTx {
         self.nonce_history = x_new;
     }
 
-    fn expected_nonce(nonce_history: u32, rx_history: u32) -> bool {
+    fn expected_checksum(nonce_history: u32, rx_history: u32) -> bool {
         let mut x = nonce_history & rx_history;
         x ^= x >> 16;
         x ^= x >> 8;
@@ -189,7 +189,7 @@ impl SegmentTx {
         &mut self,
         ack_delta: u32,
         rx_history: u32,
-        rx_history_nonce: bool,
+        rx_checksum: bool,
     ) -> bool {
         // This history queue incrementally tracks acknowledged segments from the receiver
         // until a drop is detected. A drop is detected when three segments have been received
@@ -215,11 +215,11 @@ impl SegmentTx {
             self.ack_history = self.ack_history.wrapping_shl(ack_delta);
         }
 
-        if Self::expected_nonce(self.nonce_history, rx_history) == rx_history_nonce {
+        if Self::expected_checksum(self.nonce_history, rx_history) == rx_checksum {
             // Nonce checks out, add received history bits to history buffer
             self.ack_history |= rx_history;
         } else {
-            println!("bad nonce");
+            println!("BAD NONCE");
         }
 
         if self.ack_history == u32::MAX {
@@ -260,7 +260,7 @@ impl SegmentTx {
         &mut self,
         rx_base_id: u32,
         rx_history: u32,
-        rx_history_nonce: bool,
+        rx_checksum: bool,
     ) -> bool {
         let ack_delta = rx_base_id.wrapping_sub(self.base_id);
 
@@ -284,7 +284,7 @@ impl SegmentTx {
 
             // An ack delta of zero can still update previously received packets, so update
             // ack history regardless
-            return self.update_ack_history(ack_delta, rx_history, rx_history_nonce);
+            return self.update_ack_history(ack_delta, rx_history, rx_checksum);
         }
 
         // Invalid ack, not a drop
@@ -338,16 +338,16 @@ mod tests {
 
                 let rx_history = (1 << n) - 1;
 
-                let mut rx_history_nonce = false;
+                let mut rx_checksum = false;
 
                 for j in 0..n {
-                    rx_history_nonce ^= nonces[j];
+                    rx_checksum ^= nonces[j];
                 }
 
                 let rx_base_id = id.wrapping_add(n as u32);
 
                 assert_eq!(
-                    tx.acknowledge(rx_base_id, rx_history as u32, rx_history_nonce),
+                    tx.acknowledge(rx_base_id, rx_history as u32, rx_checksum),
                     false
                 );
 

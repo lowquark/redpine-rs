@@ -14,7 +14,7 @@ pub struct SegmentRx {
     slot_1: Slot,
     len: u8,
 
-    ack_history: u32,
+    rx_history: u32,
     nonce_history: u32,
 }
 
@@ -36,7 +36,7 @@ impl SegmentRx {
             },
             len: 0,
 
-            ack_history: 0,
+            rx_history: 0,
             nonce_history: 0,
         }
     }
@@ -66,19 +66,19 @@ impl SegmentRx {
     }
 
     fn push_history_ack(&mut self, nonce: bool) {
-        self.ack_history <<= 1;
+        self.rx_history <<= 1;
         self.nonce_history <<= 1;
 
-        self.ack_history |= 0b1;
+        self.rx_history |= 0b1;
         self.nonce_history |= nonce as u32;
     }
 
     fn push_history_skips(&mut self, count: u32) {
         if count < 32 {
-            self.ack_history <<= count;
+            self.rx_history <<= count;
             self.nonce_history <<= count;
         } else {
-            self.ack_history = 0;
+            self.rx_history = 0;
             self.nonce_history = 0;
         }
     }
@@ -174,8 +174,8 @@ impl SegmentRx {
         self.window.base_id
     }
 
-    fn compute_nonce_checksum(ack_history: u8, nonce_history: u8) -> bool {
-        let mut x = ack_history & nonce_history;
+    fn compute_checksum(rx_history: u8, nonce_history: u8) -> bool {
+        let mut x = rx_history & nonce_history;
         x ^= x >> 4;
         x ^= x >> 2;
         x ^= x >> 1;
@@ -183,12 +183,14 @@ impl SegmentRx {
     }
 
     pub fn next_ack_info(&self) -> (u8, bool) {
-        let ack_history = self.ack_history as u8;
+        const ACK_MASK: u32 = 0x1F;
+
+        let rx_history = (self.rx_history & ACK_MASK) as u8;
         let nonce_history = self.nonce_history as u8;
 
         (
-            ack_history,
-            Self::compute_nonce_checksum(ack_history, nonce_history),
+            rx_history,
+            Self::compute_checksum(rx_history, nonce_history),
         )
     }
 }
@@ -227,7 +229,7 @@ mod tests {
             rx.receive(id, nonce, data, &mut handler);
 
             let next_id = rx.next_expected_id();
-            let (ack_history, nonce_checksum) = rx.next_ack_info();
+            let (rx_history, rx_checksum) = rx.next_ack_info();
 
             // Test handled segments
             assert_eq!(recv_buffer, round.1.clone().into_vec());
@@ -237,17 +239,17 @@ mod tests {
             assert_eq!(next_id, round.2 as u32);
 
             // Reported ack history should match
-            assert_eq!(ack_history, round.3);
+            assert_eq!(rx_history, round.3);
 
             // Reported nonce checksum should match manually computed value
-            let mut checksum = false;
+            let mut checksum_ref = false;
             for i in 0..8 {
-                if ack_history & (1 << i) != 0 {
+                if rx_history & (1 << i) != 0 {
                     let acked_id = next_id.wrapping_sub(1).wrapping_sub(i) as u32;
-                    checksum ^= nonces[&acked_id];
+                    checksum_ref ^= nonces[&acked_id];
                 }
             }
-            assert_eq!(nonce_checksum, checksum);
+            assert_eq!(rx_checksum, checksum_ref);
         }
     }
 
@@ -323,7 +325,7 @@ mod tests {
             (2, vec![].into(), 1, 0b00001),
             (4, vec![].into(), 1, 0b00001),
             (6, vec![2].into(), 3, 0b00101),
-            (5, vec![4, 5, 6].into(), 7, 0b1010111),
+            (5, vec![4, 5, 6].into(), 7, 0b10111),
         ];
 
         test(rounds);

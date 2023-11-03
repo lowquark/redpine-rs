@@ -255,9 +255,9 @@ impl Endpoint {
         C: HostContext,
     {
         let (read_ack, read_data) = match frame_type {
-            frame::FrameType::StreamData => (false, true),
+            frame::FrameType::StreamSegment => (false, true),
             frame::FrameType::StreamAck => (true, false),
-            frame::FrameType::StreamDataAck => (true, true),
+            frame::FrameType::StreamSegmentAck => (true, true),
             _ => panic!("NANI?"),
         };
 
@@ -266,15 +266,23 @@ impl Endpoint {
 
         if read_ack {
             if let Some(stream_ack) = frame_reader.read::<frame::StreamAck>() {
-                if self.segment_tx.acknowledge(stream_ack.data_id, 0x1F, false) {
-                    println!("drop detected");
+                println!("RECEIVE ACK {}, {:05b}, {}", stream_ack.segment_id,
+                                                       stream_ack.segment_history,
+                                                       stream_ack.segment_checksum);
+
+                if self.segment_tx.acknowledge(
+                    stream_ack.segment_id,
+                    stream_ack.segment_history.into(),
+                    stream_ack.segment_checksum,
+                ) {
+                    println!("DROP DETECTED");
                 }
 
                 self.fragment_tx
                     .acknowledge(stream_ack.unrel_id, stream_ack.rel_id);
 
                 if self.rto_timer_set {
-                    if stream_ack.data_id == self.segment_tx.next_id() {
+                    if stream_ack.segment_id == self.segment_tx.next_id() {
                         // All caught up
                         ctx.unset_timer(TimerName::Rto);
                         self.rto_timer_set = false;
@@ -290,16 +298,19 @@ impl Endpoint {
         }
 
         if read_data {
-            if let Some(stream_data_header) = frame_reader.read::<frame::StreamDataHeader>() {
-                let data_id = stream_data_header.id;
-                let data_bytes = frame_reader.remaining_bytes();
+            if let Some(stream_data_header) = frame_reader.read::<frame::StreamSegmentHeader>() {
+                let segment_id = stream_data_header.id;
+                let segment_nonce = stream_data_header.nonce;
+                let segment_bytes = frame_reader.remaining_bytes();
+
+                println!("RECEIVE SEGMENT {} {}", segment_id, segment_nonce);
 
                 self.segment_rx_buffer.receive(
-                    data_id,
-                    false,
-                    data_bytes,
-                    |stream_data: &[u8]| {
-                        let mut frame_reader = frame::serial::EzReader::new(stream_data);
+                    segment_id,
+                    segment_nonce,
+                    segment_bytes,
+                    |segment_bytes: &[u8]| {
+                        let mut frame_reader = frame::serial::EzReader::new(segment_bytes);
 
                         while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
                             let unrel = datagram.unrel;
@@ -341,9 +352,9 @@ impl Endpoint {
     {
         if let Some((mut frame_reader, frame_type)) = frame::serial::FrameReader::new(frame_bytes) {
             match frame_type {
-                frame::FrameType::StreamData
+                frame::FrameType::StreamSegment
                 | frame::FrameType::StreamAck
-                | frame::FrameType::StreamDataAck => {
+                | frame::FrameType::StreamSegmentAck => {
                     self.handle_primary(&mut frame_reader, frame_type, now_ms, ctx)
                 }
                 _ => (),
@@ -399,6 +410,7 @@ impl Endpoint {
 
             let send_data = !frame_window_limited && !congestion_window_limited && data_ready;
 
+            /*
             if !send_data {
                 println!(
                     "can't send data: {}{}{}",
@@ -407,12 +419,13 @@ impl Endpoint {
                     if !data_ready { 'd' } else { '-' }
                 );
             }
+            */
 
             if send_ack || send_data {
                 let frame_type = match (send_ack, send_data) {
-                    (false, true) => frame::FrameType::StreamData,
+                    (false, true) => frame::FrameType::StreamSegment,
                     (true, false) => frame::FrameType::StreamAck,
-                    (true, true) => frame::FrameType::StreamDataAck,
+                    (true, true) => frame::FrameType::StreamSegmentAck,
                     _ => panic!("NANI?"),
                 };
 
@@ -420,7 +433,13 @@ impl Endpoint {
                     frame::serial::FrameWriter::new(&mut self.tx_buffer, frame_type).unwrap();
 
                 if send_ack {
-                    let data_id = self.segment_rx_buffer.next_expected_id();
+                    let segment_id = self.segment_rx_buffer.next_expected_id();
+                    let (segment_history, segment_checksum) =
+                        self.segment_rx_buffer.next_ack_info();
+
+                    println!("SEND ACK {}, {:05b}, {}", segment_id,
+                                                        segment_history,
+                                                        segment_checksum);
 
                     let unrel_id = if ack_unrel {
                         Some(self.unreliable_rx.next_expected_id())
@@ -435,7 +454,9 @@ impl Endpoint {
                     };
 
                     let ack = frame::StreamAck {
-                        data_id,
+                        segment_id,
+                        segment_history,
+                        segment_checksum,
                         unrel_id,
                         rel_id,
                     };
@@ -447,9 +468,12 @@ impl Endpoint {
                 }
 
                 if send_data {
-                    let header = frame::StreamDataHeader {
+                    let header = frame::StreamSegmentHeader {
                         id: self.segment_tx.next_id(),
+                        nonce: self.segment_tx.compute_next_nonce(),
                     };
+
+                    println!("SEND SEGMENT {} {}", header.id, header.nonce);
 
                     frame_writer.write(&header);
 

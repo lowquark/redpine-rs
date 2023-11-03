@@ -15,8 +15,8 @@ fn main() {
                 ufl::client::Event::Disconnect => {
                     println!("client::Event::Disconnect");
                 }
-                ufl::client::Event::Receive(_packet_bytes) => {
-                    println!("client::Event::Receive");
+                ufl::client::Event::Receive(packet_bytes) => {
+                    println!("client::Event::Receive {packet_bytes:02X?}");
                 }
                 ufl::client::Event::Timeout => {
                     println!("client::Event::Timeout");

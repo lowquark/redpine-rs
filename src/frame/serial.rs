@@ -8,7 +8,7 @@ const HANDSHAKE_SYN_ACK_SIZE: usize = 33;
 const HANDSHAKE_ACK_SIZE: usize = 20;
 const CLOSE_SIZE: usize = 8;
 const CLOSE_ACK_SIZE: usize = 4;
-const STREAM_DATA_HEADER_SIZE: usize = 4;
+const STREAM_SEGMENT_HEADER_SIZE: usize = 5;
 const STREAM_ACK_SIZE: usize = 13;
 
 const DATAGRAM_HEADER_SIZE: usize = 1 + 4 + 2;
@@ -23,9 +23,9 @@ const FRAME_TYPE_HANDSHAKE_SYN_ACK: u8 = 0x01;
 const FRAME_TYPE_HANDSHAKE_ACK: u8 = 0x02;
 const FRAME_TYPE_CLOSE: u8 = 0x03;
 const FRAME_TYPE_CLOSE_ACK: u8 = 0x04;
-const FRAME_TYPE_STREAM_DATA: u8 = 0x05;
+const FRAME_TYPE_STREAM_SEGMENT: u8 = 0x05;
 const FRAME_TYPE_STREAM_ACK: u8 = 0x06;
-const FRAME_TYPE_STREAM_DATA_ACK: u8 = 0x07;
+const FRAME_TYPE_STREAM_SEGMENT_ACK: u8 = 0x07;
 const FRAME_TYPE_STREAM_SYNC: u8 = 0x08;
 
 pub struct Reader<'a> {
@@ -331,16 +331,26 @@ impl BlockSerial for CloseAckFrame {
     }
 }
 
-impl BlockSerial for StreamDataHeader {
-    const SIZE: usize = STREAM_DATA_HEADER_SIZE;
+impl BlockSerial for StreamSegmentHeader {
+    const SIZE: usize = STREAM_SEGMENT_HEADER_SIZE;
 
     unsafe fn read(rd: &mut Reader) -> Self {
+        let info = rd.read_u8();
         let id = rd.read_u32();
 
-        Self { id }
+        Self {
+            id,
+            nonce: info & 0x01 != 0,
+        }
     }
 
     unsafe fn write(wr: &mut Writer, obj: &Self) {
+        let mut info: u8 = 0;
+        if obj.nonce {
+            info |= 0x01;
+        }
+
+        wr.write_u8(info);
         wr.write_u32(obj.id);
     }
 }
@@ -350,32 +360,38 @@ impl BlockSerial for StreamAck {
 
     unsafe fn read(rd: &mut Reader) -> Self {
         let info = rd.read_u8();
-        let data_id = rd.read_u32();
+        let segment_id = rd.read_u32();
         let unrel_id = rd.read_u32();
         let rel_id = rd.read_u32();
 
         Self {
-            data_id,
-            unrel_id: if info & 0x01 != 0 {
+            segment_id,
+            segment_history: info & 0x1F,
+            segment_checksum: info & 0x20 != 0,
+            unrel_id: if info & 0x40 != 0 {
                 Some(unrel_id)
             } else {
                 None
             },
-            rel_id: if info & 0x02 != 0 { Some(rel_id) } else { None },
+            rel_id: if info & 0x80 != 0 { Some(rel_id) } else { None },
         }
     }
 
     unsafe fn write(wr: &mut Writer, obj: &Self) {
         let mut info: u8 = 0;
-        if obj.unrel_id.is_some() {
-            info |= 0x01;
-        }
         if obj.rel_id.is_some() {
-            info |= 0x02;
+            info |= 0x80;
         }
+        if obj.unrel_id.is_some() {
+            info |= 0x40;
+        }
+        if obj.segment_checksum {
+            info |= 0x20;
+        }
+        info |= obj.segment_history & 0x1F;
 
         wr.write_u8(info);
-        wr.write_u32(obj.data_id);
+        wr.write_u32(obj.segment_id);
         wr.write_u32(obj.unrel_id.unwrap_or(0));
         wr.write_u32(obj.rel_id.unwrap_or(0));
     }
@@ -463,9 +479,9 @@ impl<'a> FrameWriter<'a> {
             FrameType::HandshakeAck => FRAME_TYPE_HANDSHAKE_ACK,
             FrameType::Close => FRAME_TYPE_CLOSE,
             FrameType::CloseAck => FRAME_TYPE_CLOSE_ACK,
-            FrameType::StreamData => FRAME_TYPE_STREAM_DATA,
+            FrameType::StreamSegment => FRAME_TYPE_STREAM_SEGMENT,
             FrameType::StreamAck => FRAME_TYPE_STREAM_ACK,
-            FrameType::StreamDataAck => FRAME_TYPE_STREAM_DATA_ACK,
+            FrameType::StreamSegmentAck => FRAME_TYPE_STREAM_SEGMENT_ACK,
             FrameType::StreamSync => FRAME_TYPE_STREAM_SYNC,
         };
 
@@ -535,9 +551,9 @@ impl<'a> FrameReader<'a> {
             FRAME_TYPE_HANDSHAKE_ACK => FrameType::HandshakeAck,
             FRAME_TYPE_CLOSE => FrameType::Close,
             FRAME_TYPE_CLOSE_ACK => FrameType::CloseAck,
-            FRAME_TYPE_STREAM_DATA => FrameType::StreamData,
+            FRAME_TYPE_STREAM_SEGMENT => FrameType::StreamSegment,
             FRAME_TYPE_STREAM_ACK => FrameType::StreamAck,
-            FRAME_TYPE_STREAM_DATA_ACK => FrameType::StreamDataAck,
+            FRAME_TYPE_STREAM_SEGMENT_ACK => FrameType::StreamSegmentAck,
             FRAME_TYPE_STREAM_SYNC => FrameType::StreamSync,
             _ => return None,
         };
@@ -639,7 +655,7 @@ mod tests {
             let mut datagrams = Vec::new();
 
             let mut buf = [0; 32 * 1024];
-            let mut writer = serial::FrameWriter::new(&mut buf, FrameType::StreamData).unwrap();
+            let mut writer = serial::FrameWriter::new(&mut buf, FrameType::StreamSegment).unwrap();
 
             for i in 0..datagram_count {
                 let size = if i == 0 {
@@ -671,7 +687,7 @@ mod tests {
 
             let (mut reader, frame_type) = serial::FrameReader::new(frame).unwrap();
 
-            assert_eq!(frame_type, FrameType::StreamData);
+            assert_eq!(frame_type, FrameType::StreamSegment);
 
             for i in 0..datagram_count {
                 let dg = reader.read::<Datagram>().unwrap();

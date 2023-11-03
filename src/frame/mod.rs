@@ -7,9 +7,9 @@ pub enum FrameType {
     HandshakeAck,
     Close,
     CloseAck,
-    StreamData,
+    StreamSegment,
     StreamAck,
-    StreamDataAck,
+    StreamSegmentAck,
     StreamSync,
 }
 
@@ -69,20 +69,24 @@ pub struct CloseAckFrame {
 }
 
 #[derive(Debug)]
-pub struct StreamDataHeader {
+pub struct StreamSegmentHeader {
     pub id: u32,
+    pub nonce: bool,
 }
 
 #[derive(Debug)]
 pub struct StreamAck {
-    pub data_id: u32,
+    pub segment_id: u32,
+    pub segment_history: u8,
+    pub segment_checksum: bool,
+
     pub unrel_id: Option<u32>,
     pub rel_id: Option<u32>,
 }
 
 #[derive(Debug)]
 pub struct StreamSync {
-    pub data_id: u32,
+    pub segment_id: u32,
     pub unrel_id: u32,
     pub rel_id: u32,
 }
