@@ -53,7 +53,7 @@ type PeerRc = Rc<RefCell<Peer>>;
 
 struct PeerTable {
     // Mapping from sender address to peer
-    peers: HashMap<net::SocketAddr, PeerRc>,
+    peers: HashMap<net::SocketAddr, (PeerId, PeerRc)>,
     // Stack of unused IDs
     free_ids: Vec<PeerId>,
 }
@@ -225,7 +225,7 @@ impl PeerTable {
     }
 
     pub fn find(&self, addr: &net::SocketAddr) -> Option<&PeerRc> {
-        self.peers.get(addr)
+        self.peers.get(addr).map(|entry| &entry.1)
     }
 
     pub fn insert(
@@ -242,7 +242,7 @@ impl PeerTable {
                 let peer_rc = Rc::new(RefCell::new(peer));
 
                 // Associate with given address
-                self.peers.insert(addr.clone(), Rc::clone(&peer_rc));
+                self.peers.insert(addr.clone(), (new_id, Rc::clone(&peer_rc)));
 
                 return Some(peer_rc);
             }
@@ -251,12 +251,9 @@ impl PeerTable {
         return None;
     }
 
-    pub fn remove(&mut self, addr: &net::SocketAddr, id: PeerId) {
-        if let Some(peer_rc) = self.peers.remove(addr) {
-            self.free_ids.push(id);
-        } else {
-            panic!("double free?");
-        }
+    pub fn remove(&mut self, addr: &net::SocketAddr) {
+        let (id, _) = self.peers.remove(addr).expect("double free?");
+        self.free_ids.push(id);
     }
 
     pub fn count(&self) -> usize {
@@ -309,7 +306,7 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         // shoulder of Orion... I watched C-beams glitter in the dark near the
         // Tannhäuser Gate. All those moments will be lost in time, like tears in
         // rain... Time to die.
-        self.server.peer_table.remove(&self.peer.addr, self.peer.id);
+        self.server.peer_table.remove(&self.peer.addr);
     }
 
     fn on_connect(&mut self) {
