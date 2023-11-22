@@ -58,8 +58,6 @@ pub struct HandshakeAckFrame {
 
 #[derive(Debug)]
 pub struct CloseFrame {
-    pub mode: u32,
-
     pub remote_nonce: u32,
 }
 

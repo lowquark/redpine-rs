@@ -5,6 +5,7 @@ use super::SendMode;
 mod segment_rx;
 mod segment_tx;
 
+// TODO: Use generic names like A, B
 #[derive(Clone, Copy, Debug)]
 pub enum TimerName {
     // Resend time out (no ack from remote)
@@ -22,6 +23,9 @@ pub trait HostContext {
 
     // Called to unset the given timer
     fn unset_timer(&mut self, timer: TimerName);
+
+    // Called when the endpoint object itself should be destroyed
+    fn destroy_self(&mut self);
 
     // Called when the connection has been successfully initialized
     fn on_connect(&mut self);
@@ -192,9 +196,27 @@ impl FragmentTxBuffers {
     }
 }
 
+// TODO: RTO calculation
 const RESEND_TIMEOUT_MS: u64 = 3000;
 
+const CLOSE_RESEND_TIMEOUT_MS: u64 = 2000;
+const DISCONNECT_TIMEOUT_MS: u64 = 10000;
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum StateId {
+    PreInit,
+    Active,
+    Closing,
+    Closed,
+    Zombie,
+}
+
 pub struct Endpoint {
+    state_id: StateId,
+
+    local_nonce: u32,
+    remote_nonce: u32,
+
     // Sender state
     segment_tx: segment_tx::SegmentTx,
     fragment_tx: FragmentTxBuffers,
@@ -217,7 +239,13 @@ impl Endpoint {
         let fragment_window_size = 1024;
         let segment_window_size = 128;
 
+        let local_nonce = 0;
+        let remote_nonce = 0;
+
         Self {
+            state_id: StateId::PreInit,
+            local_nonce,
+            remote_nonce,
             segment_tx: segment_tx::SegmentTx::new(0, segment_window_size),
             fragment_tx: FragmentTxBuffers::new(0, fragment_window_size, fragment_size),
             cwnd: 15000,
@@ -233,6 +261,9 @@ impl Endpoint {
     where
         C: HostContext,
     {
+        debug_assert!(self.state_id == StateId::PreInit);
+
+        self.state_id = StateId::Active;
         ctx.on_connect();
     }
 
@@ -240,14 +271,15 @@ impl Endpoint {
     where
         C: HostContext,
     {
-        self.fragment_tx.enqueue(packet_bytes, mode);
-
-        self.actual_flush(false, false, now_ms, ctx);
+        if self.state_id == StateId::Active {
+            self.fragment_tx.enqueue(packet_bytes, mode);
+            self.flush_stream(false, false, now_ms, ctx);
+        }
     }
 
-    fn handle_primary<C>(
+    fn handle_stream_frame<C>(
         &mut self,
-        frame_reader: &mut frame::serial::FrameReader,
+        mut frame_reader: frame::serial::FrameReader,
         frame_type: frame::FrameType,
         now_ms: u64,
         ctx: &mut C,
@@ -266,9 +298,10 @@ impl Endpoint {
 
         if read_ack {
             if let Some(stream_ack) = frame_reader.read::<frame::StreamAck>() {
-                println!("RECEIVE ACK {}, {:05b}, {}", stream_ack.segment_id,
-                                                       stream_ack.segment_history,
-                                                       stream_ack.segment_checksum);
+                println!(
+                    "RECEIVE ACK {}, {:05b}, {}",
+                    stream_ack.segment_id, stream_ack.segment_history, stream_ack.segment_checksum
+                );
 
                 if self.segment_tx.acknowledge(
                     stream_ack.segment_id,
@@ -343,20 +376,89 @@ impl Endpoint {
             }
         }
 
-        self.actual_flush(ack_unrel, ack_rel, now_ms, ctx);
+        self.flush_stream(ack_unrel, ack_rel, now_ms, ctx);
+    }
+
+    fn validate_close_frame(&self, mut frame_reader: frame::serial::FrameReader) -> bool {
+        if let Some(frame) = frame_reader.read::<frame::CloseFrame>() {
+            frame.remote_nonce == self.local_nonce
+        } else {
+            false
+        }
+    }
+
+    fn validate_close_ack_frame(&self, mut frame_reader: frame::serial::FrameReader) -> bool {
+        if let Some(frame) = frame_reader.read::<frame::CloseAckFrame>() {
+            frame.remote_nonce == self.local_nonce
+        } else {
+            false
+        }
     }
 
     pub fn handle_frame<C>(&mut self, frame_bytes: &[u8], now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
-        if let Some((mut frame_reader, frame_type)) = frame::serial::FrameReader::new(frame_bytes) {
-            match frame_type {
-                frame::FrameType::StreamSegment
-                | frame::FrameType::StreamAck
-                | frame::FrameType::StreamSegmentAck => {
-                    self.handle_primary(&mut frame_reader, frame_type, now_ms, ctx)
-                }
+        if let Some((frame_reader, frame_type)) = frame::serial::FrameReader::new(frame_bytes) {
+            match self.state_id {
+                StateId::Active => match frame_type {
+                    frame::FrameType::StreamSegment
+                    | frame::FrameType::StreamAck
+                    | frame::FrameType::StreamSegmentAck => {
+                        self.handle_stream_frame(frame_reader, frame_type, now_ms, ctx)
+                    }
+                    frame::FrameType::Close => {
+                        if self.validate_close_frame(frame_reader) {
+                            // Acknowledge
+                            self.send_close_ack_frame(ctx);
+
+                            // Unset to prevent spurious timer event
+                            ctx.unset_timer(TimerName::Rto);
+                            // Set to ensure eventual destruction
+                            ctx.set_timer(TimerName::Receive, now_ms + DISCONNECT_TIMEOUT_MS);
+
+                            // We are now disconnected
+                            self.state_id = StateId::Closed;
+                            ctx.on_disconnect();
+                        }
+                    }
+                    _ => (),
+                },
+                StateId::Closing => match frame_type {
+                    frame::FrameType::Close => {
+                        if self.validate_close_frame(frame_reader) {
+                            // Acknowledge
+                            self.send_close_ack_frame(ctx);
+
+                            // Unset to prevent spurious timer event
+                            ctx.unset_timer(TimerName::Rto);
+
+                            // We are now disconnected
+                            self.state_id = StateId::Closed;
+                            ctx.on_disconnect();
+                        }
+                    }
+                    frame::FrameType::CloseAck => {
+                        if self.validate_close_ack_frame(frame_reader) {
+                            // Unset to prevent spurious timer event
+                            ctx.unset_timer(TimerName::Rto);
+
+                            // We are now disconnected
+                            self.state_id = StateId::Closed;
+                            ctx.on_disconnect();
+                        }
+                    }
+                    _ => (),
+                },
+                StateId::Closed => match frame_type {
+                    frame::FrameType::Close => {
+                        if self.validate_close_frame(frame_reader) {
+                            // Acknowledge further requests until destruction
+                            self.send_close_ack_frame(ctx);
+                        }
+                    }
+                    _ => (),
+                },
                 _ => (),
             }
         }
@@ -366,29 +468,61 @@ impl Endpoint {
     where
         C: HostContext,
     {
-        match timer {
-            TimerName::Rto => {
-                println!("Rto timer expired!");
-                debug_assert!(self.rto_timer_set);
+        match self.state_id {
+            StateId::Active => match timer {
+                TimerName::Rto => {
+                    println!("STREAM RESEND TIMEOUT");
+                    debug_assert!(self.rto_timer_set);
 
-                // TODO: Is it correct to assume more data can be sent, considering an ack has not
-                // been received that would have otherwise advanced send windows?
+                    // TODO: Is it correct to assume more data can be sent, considering an ack
+                    // has not been received that would have otherwise advanced send windows?
 
-                // TODO: Should a sync frame be sent instead of data?
+                    // TODO: Should a sync frame be sent instead of data?
 
-                // TODO: Should the reliable fragment queue be reset here?
+                    // TODO: Should the reliable fragment queue be reset here?
 
-                self.actual_flush(false, false, now_ms, ctx);
+                    // TODO: Time out connection
 
-                ctx.set_timer(TimerName::Rto, now_ms + RESEND_TIMEOUT_MS);
-            }
-            TimerName::Receive => {
-                println!("Receive timer expired!");
-            }
+                    self.flush_stream(false, false, now_ms, ctx);
+
+                    ctx.set_timer(TimerName::Rto, now_ms + RESEND_TIMEOUT_MS);
+                }
+                TimerName::Receive => {
+                    println!("STREAM RECEIVE FLUSH TIMEOUT");
+                }
+            },
+            StateId::Closing => match timer {
+                TimerName::Rto => {
+                    // No ack received within resend timeout
+                    println!("CLOSING TIMEOUT");
+                    self.send_close_frame(ctx);
+
+                    ctx.set_timer(TimerName::Rto, now_ms + CLOSE_RESEND_TIMEOUT_MS);
+                }
+                TimerName::Receive => {
+                    // Disconnection timed out entirely
+                    println!("CLOSING FINAL TIMEOUT");
+                    self.state_id = StateId::Zombie;
+                    ctx.on_timeout();
+
+                    ctx.destroy_self();
+                }
+            },
+            StateId::Closed => match timer {
+                TimerName::Rto => (),
+                TimerName::Receive => {
+                    // Finished acking resent close requests and/or soaking up stray packets
+                    println!("FIN");
+                    self.state_id = StateId::Zombie;
+
+                    ctx.destroy_self();
+                }
+            },
+            _ => (),
         }
     }
 
-    fn actual_flush<C>(&mut self, ack_unrel: bool, ack_rel: bool, now_ms: u64, ctx: &mut C)
+    fn flush_stream<C>(&mut self, ack_unrel: bool, ack_rel: bool, now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
@@ -437,9 +571,10 @@ impl Endpoint {
                     let (segment_history, segment_checksum) =
                         self.segment_rx_buffer.next_ack_info();
 
-                    println!("SEND ACK {}, {:05b}, {}", segment_id,
-                                                        segment_history,
-                                                        segment_checksum);
+                    println!(
+                        "SEND ACK {}, {:05b}, {}",
+                        segment_id, segment_history, segment_checksum
+                    );
 
                     let unrel_id = if ack_unrel {
                         Some(self.unreliable_rx.next_expected_id())
@@ -503,13 +638,54 @@ impl Endpoint {
     where
         C: HostContext,
     {
-        self.actual_flush(false, false, now_ms, ctx);
+        if self.state_id == StateId::Active {
+            self.flush_stream(false, false, now_ms, ctx);
+        }
     }
 
-    pub fn disconnect<C>(&mut self, _now_ms: u64, _ctx: &mut C)
+    fn send_close_frame<C>(&mut self, ctx: &mut C)
     where
         C: HostContext,
     {
+        let mut frame_writer =
+            frame::serial::FrameWriter::new(&mut self.tx_buffer, frame::FrameType::Close).unwrap();
+
+        frame_writer.write(&frame::CloseFrame { remote_nonce: self.remote_nonce });
+
+        let frame = frame_writer.finalize();
+
+        ctx.send_frame(frame);
+    }
+
+    fn send_close_ack_frame<C>(&mut self, ctx: &mut C)
+    where
+        C: HostContext,
+    {
+        let mut frame_writer =
+            frame::serial::FrameWriter::new(&mut self.tx_buffer, frame::FrameType::CloseAck)
+                .unwrap();
+
+        frame_writer.write(&frame::CloseAckFrame { remote_nonce: self.remote_nonce });
+
+        let frame = frame_writer.finalize();
+
+        ctx.send_frame(frame);
+    }
+
+    pub fn disconnect<C>(&mut self, now_ms: u64, ctx: &mut C)
+    where
+        C: HostContext,
+    {
+        if self.state_id == StateId::Active {
+            self.state_id = StateId::Closing;
+
+            self.send_close_frame(ctx);
+
+            // Set to resend close resquests
+            ctx.set_timer(TimerName::Rto, now_ms + CLOSE_RESEND_TIMEOUT_MS);
+            // Set to ensure eventual destruction
+            ctx.set_timer(TimerName::Receive, now_ms + DISCONNECT_TIMEOUT_MS);
+        }
     }
 }
 
@@ -538,6 +714,10 @@ mod tests {
             println!("unset timer {:?}", timer);
         }
 
+        fn destroy_self(&mut self) {
+            println!("destroy self");
+        }
+
         fn on_connect(&mut self) {
             println!("connect");
         }
@@ -560,6 +740,6 @@ mod tests {
         let mut host_ctx = MockHostContext::new();
         let mut endpoint = Endpoint::new();
 
-        endpoint.actual_flush(true, true, 0, &mut host_ctx);
+        endpoint.flush_stream(true, true, 0, &mut host_ctx);
     }
 }

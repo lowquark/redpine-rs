@@ -185,12 +185,7 @@ impl SegmentTx {
         x & 0b1 == 0b1
     }
 
-    fn update_ack_history(
-        &mut self,
-        ack_delta: u32,
-        rx_history: u32,
-        rx_checksum: bool,
-    ) -> bool {
+    fn update_ack_history(&mut self, ack_delta: u32, rx_history: u32, rx_checksum: bool) -> bool {
         // This history queue incrementally tracks acknowledged segments from the receiver
         // until a drop is detected. A drop is detected when three segments have been received
         // after an unacknowledged segment, or any unacknowledged segment is behind the base ID
@@ -256,12 +251,7 @@ impl SegmentTx {
 
     /// Acknowledges previously sent frames according to acknowledgement data. Returns true if a
     /// drop has been detected, false otherwise.
-    pub fn acknowledge(
-        &mut self,
-        rx_base_id: u32,
-        rx_history: u32,
-        rx_checksum: bool,
-    ) -> bool {
+    pub fn acknowledge(&mut self, rx_base_id: u32, rx_history: u32, rx_checksum: bool) -> bool {
         let ack_delta = rx_base_id.wrapping_sub(self.base_id);
 
         // The delta ack must not exceed the next ID to be sent, else it is invalid

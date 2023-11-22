@@ -38,7 +38,7 @@ struct ActiveState {
 enum State {
     Handshake(HandshakeState),
     Active(ActiveState),
-    Closed,
+    Quiescent,
 }
 
 struct Timer {
@@ -179,13 +179,20 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         }
     }
 
+    fn destroy_self(&mut self) {
+        // I've seen things you people wouldn't believe... Attack ships on fire off the
+        // shoulder of Orion... I watched C-beams glitter in the dark near the
+        // Tannhäuser Gate. All those moments will be lost in time, like tears in
+        // rain... Time to die.
+        self.client.state = State::Quiescent;
+    }
+
     fn on_connect(&mut self) {
         self.client.events.push_back(Event::Connect);
     }
 
     fn on_disconnect(&mut self) {
         self.client.events.push_back(Event::Disconnect);
-        self.client.state = State::Closed;
     }
 
     fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
@@ -194,7 +201,6 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
 
     fn on_timeout(&mut self) {
         self.client.events.push_back(Event::Timeout);
-        self.client.state = State::Closed;
     }
 }
 
@@ -237,7 +243,7 @@ impl ClientCore {
                         if now_ms >= state.timeout_time_ms {
                             // Connection failed
                             self.events.push_back(Event::Timeout);
-                            self.state = State::Closed;
+                            self.state = State::Quiescent;
                         } else {
                             self.timers.rto_timer.timeout_ms = Some(now_ms + SYN_TIMEOUT_MS);
 
@@ -265,7 +271,7 @@ impl ClientCore {
                     .borrow_mut()
                     .handle_timer(timer_id, now_ms, host_ctx);
             }
-            State::Closed => {}
+            State::Quiescent => {}
         }
     }
 
@@ -349,7 +355,7 @@ impl ClientCore {
                         .borrow_mut()
                         .handle_frame(frame_bytes, now_ms, host_ctx);
                 }
-                State::Closed => {}
+                State::Quiescent => {}
             }
         } else {
             // We don't negotiate with entropy
@@ -395,7 +401,7 @@ impl ClientCore {
                     .borrow_mut()
                     .send(packet_bytes, mode, now_ms, host_ctx);
             }
-            State::Closed => {}
+            State::Quiescent => {}
         }
     }
 
@@ -411,7 +417,23 @@ impl ClientCore {
 
                 endpoint_rc.borrow_mut().flush(now_ms, host_ctx);
             }
-            State::Closed => {}
+            State::Quiescent => {}
+        }
+    }
+
+    pub fn disconnect(&mut self) {
+        match &mut self.state {
+            State::Handshake(_) => {}
+            State::Active(state) => {
+                let endpoint_rc = Rc::clone(&state.endpoint_rc);
+
+                let now_ms = self.time_now_ms();
+
+                let ref mut host_ctx = EndpointContext::new(self);
+
+                endpoint_rc.borrow_mut().disconnect(now_ms, host_ctx);
+            }
+            State::Quiescent => {}
         }
     }
 }
@@ -548,6 +570,10 @@ impl Client {
 
     pub fn flush(&mut self) {
         self.core.flush();
+    }
+
+    pub fn disconnect(&mut self) {
+        self.core.disconnect();
     }
 
     pub fn local_addr(&self) -> net::SocketAddr {

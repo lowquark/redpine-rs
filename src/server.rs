@@ -251,11 +251,11 @@ impl PeerTable {
         return None;
     }
 
-    pub fn remove(&mut self, addr: &net::SocketAddr) {
+    pub fn remove(&mut self, addr: &net::SocketAddr, id: PeerId) {
         if let Some(peer_rc) = self.peers.remove(addr) {
-            self.free_ids.push(peer_rc.borrow().core.id);
+            self.free_ids.push(id);
         } else {
-            println!("double free");
+            panic!("double free?");
         }
     }
 
@@ -304,6 +304,14 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         }
     }
 
+    fn destroy_self(&mut self) {
+        // I've seen things you people wouldn't believe... Attack ships on fire off the
+        // shoulder of Orion... I watched C-beams glitter in the dark near the
+        // Tannhäuser Gate. All those moments will be lost in time, like tears in
+        // rain... Time to die.
+        self.server.peer_table.remove(&self.peer.addr, self.peer.id);
+    }
+
     fn on_connect(&mut self) {
         let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
         let event = Event::Connect(handle);
@@ -314,8 +322,6 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
         let event = Event::Disconnect(handle);
         self.server.events.push_back(event);
-
-        self.server.peer_table.remove(&self.peer.addr);
     }
 
     fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
@@ -328,8 +334,6 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
         let event = Event::Timeout(handle);
         self.server.events.push_back(event);
-
-        self.server.peer_table.remove(&self.peer.addr);
     }
 }
 

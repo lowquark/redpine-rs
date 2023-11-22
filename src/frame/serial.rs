@@ -6,7 +6,7 @@ const FRAME_CRC_SIZE: usize = 4;
 const HANDSHAKE_SYN_SIZE: usize = 21;
 const HANDSHAKE_SYN_ACK_SIZE: usize = 33;
 const HANDSHAKE_ACK_SIZE: usize = 20;
-const CLOSE_SIZE: usize = 8;
+const CLOSE_SIZE: usize = 4;
 const CLOSE_ACK_SIZE: usize = 4;
 const STREAM_SEGMENT_HEADER_SIZE: usize = 5;
 const STREAM_ACK_SIZE: usize = 13;
@@ -305,14 +305,12 @@ impl BlockSerial for CloseFrame {
     const SIZE: usize = CLOSE_SIZE;
 
     unsafe fn read(rd: &mut Reader) -> Self {
-        let mode = rd.read_u32();
         let remote_nonce = rd.read_u32();
 
-        Self { mode, remote_nonce }
+        Self { remote_nonce }
     }
 
     unsafe fn write(wr: &mut Writer, obj: &Self) {
-        wr.write_u32(obj.mode);
         wr.write_u32(obj.remote_nonce);
     }
 }
