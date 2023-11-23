@@ -15,8 +15,6 @@ pub enum FrameType {
 
 #[derive(Debug)]
 pub struct ConnectionParams {
-    pub protocol_id: u8,
-    pub receive_rate_max: u32,
     pub packet_size_in_max: u32,
     pub packet_size_out_max: u32,
 }
@@ -31,29 +29,35 @@ pub struct Datagram<'a> {
 }
 
 #[derive(Debug)]
-pub struct HandshakeSynFrame {
-    pub client_params: ConnectionParams,
+pub struct HandshakeAlphaFrame {
+    pub protocol_id: u16,
 
-    pub client_mode: u32,
     pub client_nonce: u32,
 }
 
 #[derive(Debug)]
-pub struct HandshakeSynAckFrame {
+pub struct HandshakeAlphaAckFrame {
     pub server_params: ConnectionParams,
 
-    pub client_mode: u32,
     pub client_nonce: u32,
     pub server_nonce: u32,
-    pub mac: u64,
+    pub server_timestamp: u32,
+    pub server_mac: u64,
 }
 
 #[derive(Debug)]
-pub struct HandshakeAckFrame {
-    pub client_mode: u32,
+pub struct HandshakeBetaFrame {
+    pub client_params: ConnectionParams,
+
     pub client_nonce: u32,
     pub server_nonce: u32,
-    pub mac: u64,
+    pub server_timestamp: u32,
+    pub server_mac: u64,
+}
+
+#[derive(Debug)]
+pub struct HandshakeBetaAckFrame {
+    pub client_nonce: u32,
 }
 
 #[derive(Debug)]

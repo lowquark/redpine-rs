@@ -3,9 +3,10 @@ use super::*;
 const FRAME_HEADER_SIZE: usize = 1;
 const FRAME_CRC_SIZE: usize = 4;
 
-const HANDSHAKE_SYN_SIZE: usize = 21;
-const HANDSHAKE_SYN_ACK_SIZE: usize = 33;
-const HANDSHAKE_ACK_SIZE: usize = 20;
+const HANDSHAKE_ALPHA_SIZE: usize = 6;
+const HANDSHAKE_ALPHA_ACK_SIZE: usize = 28;
+const HANDSHAKE_BETA_SIZE: usize = 28;
+const HANDSHAKE_BETA_ACK_SIZE: usize = 4;
 const CLOSE_SIZE: usize = 4;
 const CLOSE_ACK_SIZE: usize = 4;
 const STREAM_SEGMENT_HEADER_SIZE: usize = 5;
@@ -204,100 +205,104 @@ where
     }
 }
 
-impl BlockSerial for HandshakeSynFrame {
-    const SIZE: usize = HANDSHAKE_SYN_SIZE;
+impl BlockSerial for HandshakeAlphaFrame {
+    const SIZE: usize = HANDSHAKE_ALPHA_SIZE;
 
     unsafe fn read(rd: &mut Reader) -> Self {
-        let protocol_id = rd.read_u8();
-        let receive_rate_max = rd.read_u32();
-        let packet_size_in_max = rd.read_u32();
-        let packet_size_out_max = rd.read_u32();
-        let client_mode = rd.read_u32();
+        let protocol_id = rd.read_u16();
         let client_nonce = rd.read_u32();
 
         Self {
-            client_params: ConnectionParams {
-                protocol_id,
-                receive_rate_max,
-                packet_size_in_max,
-                packet_size_out_max,
-            },
-            client_mode,
+            protocol_id,
             client_nonce,
         }
     }
 
     unsafe fn write(wr: &mut Writer, obj: &Self) {
-        wr.write_u8(obj.client_params.protocol_id);
-        wr.write_u32(obj.client_params.receive_rate_max);
-        wr.write_u32(obj.client_params.packet_size_in_max);
-        wr.write_u32(obj.client_params.packet_size_out_max);
-        wr.write_u32(obj.client_mode);
+        wr.write_u16(obj.protocol_id);
         wr.write_u32(obj.client_nonce);
     }
 }
 
-impl BlockSerial for HandshakeSynAckFrame {
-    const SIZE: usize = HANDSHAKE_SYN_ACK_SIZE;
+impl BlockSerial for HandshakeAlphaAckFrame {
+    const SIZE: usize = HANDSHAKE_ALPHA_ACK_SIZE;
 
     unsafe fn read(rd: &mut Reader) -> Self {
-        let protocol_id = rd.read_u8();
-        let receive_rate_max = rd.read_u32();
         let packet_size_in_max = rd.read_u32();
         let packet_size_out_max = rd.read_u32();
-        let client_mode = rd.read_u32();
         let client_nonce = rd.read_u32();
         let server_nonce = rd.read_u32();
-        let mac = rd.read_u64();
+        let server_timestamp = rd.read_u32();
+        let server_mac = rd.read_u64();
 
         Self {
             server_params: ConnectionParams {
-                protocol_id,
-                receive_rate_max,
                 packet_size_in_max,
                 packet_size_out_max,
             },
-            client_mode,
             client_nonce,
             server_nonce,
-            mac,
+            server_timestamp,
+            server_mac,
         }
     }
 
     unsafe fn write(wr: &mut Writer, obj: &Self) {
-        wr.write_u8(obj.server_params.protocol_id);
-        wr.write_u32(obj.server_params.receive_rate_max);
         wr.write_u32(obj.server_params.packet_size_in_max);
         wr.write_u32(obj.server_params.packet_size_out_max);
-        wr.write_u32(obj.client_mode);
         wr.write_u32(obj.client_nonce);
         wr.write_u32(obj.server_nonce);
-        wr.write_u64(obj.mac);
+        wr.write_u32(obj.server_timestamp);
+        wr.write_u64(obj.server_mac);
     }
 }
 
-impl BlockSerial for HandshakeAckFrame {
-    const SIZE: usize = HANDSHAKE_ACK_SIZE;
+impl BlockSerial for HandshakeBetaFrame {
+    const SIZE: usize = HANDSHAKE_BETA_SIZE;
 
     unsafe fn read(rd: &mut Reader) -> Self {
-        let client_mode = rd.read_u32();
+        let packet_size_in_max = rd.read_u32();
+        let packet_size_out_max = rd.read_u32();
         let client_nonce = rd.read_u32();
         let server_nonce = rd.read_u32();
-        let mac = rd.read_u64();
+        let server_timestamp = rd.read_u32();
+        let server_mac = rd.read_u64();
 
         Self {
-            client_mode,
+            client_params: ConnectionParams {
+                packet_size_in_max,
+                packet_size_out_max,
+            },
             client_nonce,
             server_nonce,
-            mac,
+            server_timestamp,
+            server_mac,
         }
     }
 
     unsafe fn write(wr: &mut Writer, obj: &Self) {
-        wr.write_u32(obj.client_mode);
+        wr.write_u32(obj.client_params.packet_size_in_max);
+        wr.write_u32(obj.client_params.packet_size_out_max);
         wr.write_u32(obj.client_nonce);
         wr.write_u32(obj.server_nonce);
-        wr.write_u64(obj.mac);
+        wr.write_u32(obj.server_timestamp);
+        wr.write_u64(obj.server_mac);
+    }
+}
+
+impl BlockSerial for HandshakeBetaAckFrame {
+    const SIZE: usize = HANDSHAKE_BETA_ACK_SIZE;
+
+    unsafe fn read(rd: &mut Reader) -> Self {
+        let client_nonce = rd.read_u32();
+
+        Self {
+            client_nonce,
+        }
+    }
+
+    unsafe fn write(wr: &mut Writer, obj: &Self) {
+        wr.write_u32(obj.client_nonce);
     }
 }
 
