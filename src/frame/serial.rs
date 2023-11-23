@@ -1,16 +1,19 @@
 use super::*;
 
-const FRAME_HEADER_SIZE: usize = 1;
-const FRAME_CRC_SIZE: usize = 4;
+pub const PROTOCOL_ID: u16 = 0;
 
-const HANDSHAKE_ALPHA_SIZE: usize = 6;
-const HANDSHAKE_ALPHA_ACK_SIZE: usize = 28;
-const HANDSHAKE_BETA_SIZE: usize = 28;
-const HANDSHAKE_BETA_ACK_SIZE: usize = 4;
-const CLOSE_SIZE: usize = 4;
-const CLOSE_ACK_SIZE: usize = 4;
-const STREAM_SEGMENT_HEADER_SIZE: usize = 5;
-const STREAM_ACK_SIZE: usize = 13;
+pub const FRAME_HEADER_SIZE: usize = 1;
+pub const FRAME_CRC_SIZE: usize = 4;
+pub const FRAME_OVERHEAD_SIZE: usize = FRAME_HEADER_SIZE + FRAME_CRC_SIZE;
+
+pub const HANDSHAKE_ALPHA_SIZE: usize = 6;
+pub const HANDSHAKE_ALPHA_ACK_SIZE: usize = 28;
+pub const HANDSHAKE_BETA_SIZE: usize = 28;
+pub const HANDSHAKE_BETA_ACK_SIZE: usize = 4;
+pub const CLOSE_SIZE: usize = 4;
+pub const CLOSE_ACK_SIZE: usize = 4;
+pub const STREAM_SEGMENT_HEADER_SIZE: usize = 5;
+pub const STREAM_ACK_SIZE: usize = 13;
 
 const DATAGRAM_HEADER_SIZE: usize = 1 + 4 + 2;
 const DATAGRAM_DATA_SIZE_MAX: usize = u16::max_value() as usize;
@@ -19,15 +22,16 @@ const DATAGRAM_FIRST_BIT: u8 = 0x02;
 const DATAGRAM_LAST_BIT: u8 = 0x04;
 
 const FRAME_TYPE_MASK: u8 = 0x0F;
-const FRAME_TYPE_HANDSHAKE_SYN: u8 = 0x00;
-const FRAME_TYPE_HANDSHAKE_SYN_ACK: u8 = 0x01;
-const FRAME_TYPE_HANDSHAKE_ACK: u8 = 0x02;
-const FRAME_TYPE_CLOSE: u8 = 0x03;
-const FRAME_TYPE_CLOSE_ACK: u8 = 0x04;
-const FRAME_TYPE_STREAM_SEGMENT: u8 = 0x05;
-const FRAME_TYPE_STREAM_ACK: u8 = 0x06;
-const FRAME_TYPE_STREAM_SEGMENT_ACK: u8 = 0x07;
-const FRAME_TYPE_STREAM_SYNC: u8 = 0x08;
+const FRAME_TYPE_HANDSHAKE_ALPHA: u8 = 0x00;
+const FRAME_TYPE_HANDSHAKE_ALPHA_ACK: u8 = 0x01;
+const FRAME_TYPE_HANDSHAKE_BETA: u8 = 0x02;
+const FRAME_TYPE_HANDSHAKE_BETA_ACK: u8 = 0x03;
+const FRAME_TYPE_CLOSE: u8 = 0x04;
+const FRAME_TYPE_CLOSE_ACK: u8 = 0x05;
+const FRAME_TYPE_STREAM_SEGMENT: u8 = 0x06;
+const FRAME_TYPE_STREAM_ACK: u8 = 0x07;
+const FRAME_TYPE_STREAM_SEGMENT_ACK: u8 = 0x08;
+const FRAME_TYPE_STREAM_SYNC: u8 = 0x09;
 
 pub struct Reader<'a> {
     ptr: *const u8,
@@ -296,9 +300,7 @@ impl BlockSerial for HandshakeBetaAckFrame {
     unsafe fn read(rd: &mut Reader) -> Self {
         let client_nonce = rd.read_u32();
 
-        Self {
-            client_nonce,
-        }
+        Self { client_nonce }
     }
 
     unsafe fn write(wr: &mut Writer, obj: &Self) {
@@ -477,9 +479,10 @@ impl<'a> FrameWriter<'a> {
         }
 
         let type_bits = match frame_type {
-            FrameType::HandshakeSyn => FRAME_TYPE_HANDSHAKE_SYN,
-            FrameType::HandshakeSynAck => FRAME_TYPE_HANDSHAKE_SYN_ACK,
-            FrameType::HandshakeAck => FRAME_TYPE_HANDSHAKE_ACK,
+            FrameType::HandshakeAlpha => FRAME_TYPE_HANDSHAKE_ALPHA,
+            FrameType::HandshakeAlphaAck => FRAME_TYPE_HANDSHAKE_ALPHA_ACK,
+            FrameType::HandshakeBeta => FRAME_TYPE_HANDSHAKE_BETA,
+            FrameType::HandshakeBetaAck => FRAME_TYPE_HANDSHAKE_BETA_ACK,
             FrameType::Close => FRAME_TYPE_CLOSE,
             FrameType::CloseAck => FRAME_TYPE_CLOSE_ACK,
             FrameType::StreamSegment => FRAME_TYPE_STREAM_SEGMENT,
@@ -549,9 +552,10 @@ impl<'a> FrameReader<'a> {
         let type_bits = unsafe { rd.read_u8() } & FRAME_TYPE_MASK;
 
         let frame_type = match type_bits {
-            FRAME_TYPE_HANDSHAKE_SYN => FrameType::HandshakeSyn,
-            FRAME_TYPE_HANDSHAKE_SYN_ACK => FrameType::HandshakeSynAck,
-            FRAME_TYPE_HANDSHAKE_ACK => FrameType::HandshakeAck,
+            FRAME_TYPE_HANDSHAKE_ALPHA => FrameType::HandshakeAlpha,
+            FRAME_TYPE_HANDSHAKE_ALPHA_ACK => FrameType::HandshakeAlphaAck,
+            FRAME_TYPE_HANDSHAKE_BETA => FrameType::HandshakeBeta,
+            FRAME_TYPE_HANDSHAKE_BETA_ACK => FrameType::HandshakeBetaAck,
             FRAME_TYPE_CLOSE => FrameType::Close,
             FRAME_TYPE_CLOSE_ACK => FrameType::CloseAck,
             FRAME_TYPE_STREAM_SEGMENT => FrameType::StreamSegment,

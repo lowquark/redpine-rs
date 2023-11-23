@@ -650,7 +650,9 @@ impl Endpoint {
         let mut frame_writer =
             frame::serial::FrameWriter::new(&mut self.tx_buffer, frame::FrameType::Close).unwrap();
 
-        frame_writer.write(&frame::CloseFrame { remote_nonce: self.remote_nonce });
+        frame_writer.write(&frame::CloseFrame {
+            remote_nonce: self.remote_nonce,
+        });
 
         let frame = frame_writer.finalize();
 
@@ -665,7 +667,9 @@ impl Endpoint {
             frame::serial::FrameWriter::new(&mut self.tx_buffer, frame::FrameType::CloseAck)
                 .unwrap();
 
-        frame_writer.write(&frame::CloseAckFrame { remote_nonce: self.remote_nonce });
+        frame_writer.write(&frame::CloseAckFrame {
+            remote_nonce: self.remote_nonce,
+        });
 
         let frame = frame_writer.finalize();
 

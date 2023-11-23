@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::time;
 
 use super::endpoint;
+use super::frame;
 use super::SendMode;
 
 struct SocketReceiver {
@@ -29,6 +30,8 @@ struct HandshakeState {
     timeout_time_ms: u64,
     timeout_ms: u64,
     packet_buffer: Vec<(Box<[u8]>, SendMode)>,
+    local_nonce: u32,
+    frame: Box<[u8]>,
 }
 
 struct ActiveState {
@@ -86,7 +89,7 @@ pub struct Client {
 
 const SOCKET_POLLING_KEY: usize = 0;
 
-const SYN_TIMEOUT_MS: u64 = 2000;
+const HANDSHAKE_RESEND_TIMEOUT_MS: u64 = 2000;
 const HANDSHAKE_TIMEOUT_MS: u64 = 10000;
 
 impl SocketReceiver {
@@ -204,6 +207,32 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     }
 }
 
+fn serialize_handshake_alpha(frame: &frame::HandshakeAlphaFrame) -> Box<[u8]> {
+    let ref mut buffer =
+        [0u8; frame::serial::HANDSHAKE_ALPHA_SIZE + frame::serial::FRAME_OVERHEAD_SIZE];
+
+    let mut wr = frame::serial::FrameWriter::new(buffer, frame::FrameType::HandshakeAlpha).unwrap();
+
+    wr.write(frame);
+
+    return wr.finalize().into();
+}
+
+fn serialize_handshake_beta(frame: &frame::HandshakeBetaFrame) -> Box<[u8]> {
+    let ref mut buffer =
+        [0u8; frame::serial::HANDSHAKE_BETA_SIZE + frame::serial::FRAME_OVERHEAD_SIZE];
+
+    let mut wr = frame::serial::FrameWriter::new(buffer, frame::FrameType::HandshakeBeta).unwrap();
+
+    wr.write(frame);
+
+    return wr.finalize().into();
+}
+
+fn connection_params_compatible(a: &frame::ConnectionParams, b: &frame::ConnectionParams) -> bool {
+    a.packet_size_in_max >= b.packet_size_out_max && b.packet_size_in_max >= a.packet_size_out_max
+}
+
 impl ClientCore {
     /// Returns the number of whole milliseconds elapsed since the client object was created.
     fn time_now_ms(&self) -> u64 {
@@ -245,16 +274,17 @@ impl ClientCore {
                             self.events.push_back(Event::Timeout);
                             self.state = State::Quiescent;
                         } else {
-                            self.timers.rto_timer.timeout_ms = Some(now_ms + SYN_TIMEOUT_MS);
+                            self.timers.rto_timer.timeout_ms =
+                                Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
 
                             match state.phase {
                                 HandshakePhase::Alpha => {
                                     println!("re-requesting phase α...");
-                                    let _ = self.socket.send(&[0xA0]);
+                                    let _ = self.socket.send(&state.frame);
                                 }
                                 HandshakePhase::Beta => {
                                     println!("re-requesting phase β...");
-                                    let _ = self.socket.send(&[0xB0]);
+                                    let _ = self.socket.send(&state.frame);
                                 }
                             }
                         }
@@ -301,50 +331,80 @@ impl ClientCore {
 
         // println!(" -> {:02X?}", frame_bytes);
 
-        let crc_valid = true;
-
-        if crc_valid {
+        if let Some((mut rd, frame_type)) = frame::serial::FrameReader::new(frame_bytes) {
             match self.state {
                 State::Handshake(ref mut state) => match state.phase {
-                    HandshakePhase::Alpha => {
-                        if frame_bytes == [0xA1] {
-                            state.phase = HandshakePhase::Beta;
-                            state.timeout_time_ms = now_ms + state.timeout_ms;
+                    HandshakePhase::Alpha => match frame_type {
+                        frame::FrameType::HandshakeAlphaAck => {
+                            if let Some(frame) = rd.read::<frame::HandshakeAlphaAckFrame>() {
+                                let client_params = frame::ConnectionParams {
+                                    packet_size_in_max: u32::max_value(),
+                                    packet_size_out_max: u32::max_value(),
+                                };
 
-                            println!("requesting phase β...");
-                            let _ = self.socket.send(&[0xB0]);
-                        }
-                    }
-                    HandshakePhase::Beta => {
-                        if frame_bytes == [0xB1] {
-                            // Reset any previous timers
-                            self.timers.rto_timer.timeout_ms = None;
-                            self.timers.recv_timer.timeout_ms = None;
+                                let nonce_valid = frame.client_nonce == state.local_nonce;
+                                let params_compatible = connection_params_compatible(
+                                    &client_params,
+                                    &frame.server_params,
+                                );
 
-                            // Keep queued up packets to be sent later
-                            let packet_buffer = std::mem::take(&mut state.packet_buffer);
+                                if nonce_valid && params_compatible {
+                                    state.phase = HandshakePhase::Beta;
+                                    state.timeout_time_ms = now_ms + state.timeout_ms;
+                                    self.timers.rto_timer.timeout_ms =
+                                        Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
 
-                            // Create an endpoint now that we're connected
-                            let endpoint = endpoint::Endpoint::new();
-                            let endpoint_rc = Rc::new(RefCell::new(endpoint));
+                                    state.frame =
+                                        serialize_handshake_beta(&frame::HandshakeBetaFrame {
+                                            client_params,
+                                            client_nonce: frame.client_nonce,
+                                            server_nonce: frame.server_nonce,
+                                            server_timestamp: frame.server_timestamp,
+                                            server_mac: frame.server_mac,
+                                        });
 
-                            // Switch to active state
-                            self.state = State::Active(ActiveState {
-                                endpoint_rc: Rc::clone(&endpoint_rc),
-                            });
-
-                            // Initialize endpoint
-                            let mut endpoint = endpoint_rc.borrow_mut();
-
-                            let ref mut host_ctx = EndpointContext::new(self);
-
-                            endpoint.init(now_ms, host_ctx);
-
-                            for (packet, mode) in packet_buffer.into_iter() {
-                                endpoint.send(packet, mode, now_ms, host_ctx);
+                                    println!("requesting phase β...");
+                                    let _ = self.socket.send(&state.frame);
+                                }
                             }
                         }
-                    }
+                        _ => (),
+                    },
+                    HandshakePhase::Beta => match frame_type {
+                        frame::FrameType::HandshakeBetaAck => {
+                            if let Some(frame) = rd.read::<frame::HandshakeBetaAckFrame>() {
+                                if frame.client_nonce == state.local_nonce {
+                                    // Reset any previous timers
+                                    self.timers.rto_timer.timeout_ms = None;
+                                    self.timers.recv_timer.timeout_ms = None;
+
+                                    // Keep queued up packets to be sent later
+                                    let packet_buffer = std::mem::take(&mut state.packet_buffer);
+
+                                    // Create an endpoint now that we're connected
+                                    let endpoint = endpoint::Endpoint::new();
+                                    let endpoint_rc = Rc::new(RefCell::new(endpoint));
+
+                                    // Switch to active state
+                                    self.state = State::Active(ActiveState {
+                                        endpoint_rc: Rc::clone(&endpoint_rc),
+                                    });
+
+                                    // Initialize endpoint
+                                    let mut endpoint = endpoint_rc.borrow_mut();
+
+                                    let ref mut host_ctx = EndpointContext::new(self);
+
+                                    endpoint.init(now_ms, host_ctx);
+
+                                    for (packet, mode) in packet_buffer.into_iter() {
+                                        endpoint.send(packet, mode, now_ms, host_ctx);
+                                    }
+                                }
+                            }
+                        }
+                        _ => (),
+                    },
                 },
                 State::Active(ref mut state) => {
                     let endpoint_rc = Rc::clone(&state.endpoint_rc);
@@ -357,8 +417,6 @@ impl ClientCore {
                 }
                 State::Quiescent => {}
             }
-        } else {
-            // We don't negotiate with entropy
         }
     }
 
@@ -454,12 +512,19 @@ impl Client {
         let local_addr = socket.local_addr()?;
         let peer_addr = socket.peer_addr()?;
 
-        println!("requesting phase α...");
-        let _ = socket.send(&[0xA0]);
-
         let socket_rc = Rc::new(socket);
 
         let receiver = SocketReceiver::new(Rc::clone(&socket_rc), frame_size_max)?;
+
+        let local_nonce = rand::random::<u32>();
+
+        let handshake_frame = serialize_handshake_alpha(&frame::HandshakeAlphaFrame {
+            protocol_id: frame::serial::PROTOCOL_ID,
+            client_nonce: local_nonce,
+        });
+
+        println!("requesting phase α...");
+        let _ = socket_rc.send(&handshake_frame);
 
         Ok(Self {
             core: ClientCore {
@@ -470,10 +535,12 @@ impl Client {
                     timeout_time_ms: HANDSHAKE_TIMEOUT_MS,
                     timeout_ms: HANDSHAKE_TIMEOUT_MS,
                     packet_buffer: Vec::new(),
+                    frame: handshake_frame,
+                    local_nonce,
                 }),
                 timers: Timers {
                     rto_timer: Timer {
-                        timeout_ms: Some(SYN_TIMEOUT_MS),
+                        timeout_ms: Some(HANDSHAKE_RESEND_TIMEOUT_MS),
                     },
                     recv_timer: Timer { timeout_ms: None },
                 },

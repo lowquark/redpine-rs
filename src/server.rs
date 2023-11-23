@@ -6,6 +6,7 @@ use std::rc::{Rc, Weak};
 use std::time;
 
 use super::endpoint;
+use super::frame;
 use super::timer_wheel;
 use super::SendMode;
 
@@ -78,6 +79,8 @@ struct ServerCore {
     time_ref: time::Instant,
     // Server socket
     socket: Rc<net::UdpSocket>,
+    // Key used to compute handshake MACs
+    siphash_key: u128,
     // Table of connected peers
     peer_table: PeerTable,
     // Pending timer events
@@ -122,6 +125,8 @@ const TIMER_WHEEL_ARRAY_CONFIG: [timer_wheel::ArrayConfig; 3] = [
         ms_per_bin: 4 * 8 * 8,
     },
 ];
+
+const HANDSHAKE_TIMEOUT_MS: u32 = 10000;
 
 impl SocketReceiver {
     fn new(socket: Rc<net::UdpSocket>, frame_size_max: usize) -> std::io::Result<Self> {
@@ -231,18 +236,19 @@ impl PeerTable {
     pub fn insert(
         &mut self,
         addr: &net::SocketAddr,
-        server_weak: ServerCoreWeak,
+        server_weak: &ServerCoreWeak,
     ) -> Option<PeerRc> {
         // Ensure a peer does not already exist at this address
         if !self.peers.contains_key(addr) {
             // Allocate an ID (an empty stack means we have reached the peer limit)
             if let Some(new_id) = self.free_ids.pop() {
                 // Create new peer object
-                let peer = Peer::new(new_id, addr.clone(), server_weak);
+                let peer = Peer::new(new_id, addr.clone(), Weak::clone(server_weak));
                 let peer_rc = Rc::new(RefCell::new(peer));
 
                 // Associate with given address
-                self.peers.insert(addr.clone(), (new_id, Rc::clone(&peer_rc)));
+                self.peers
+                    .insert(addr.clone(), (new_id, Rc::clone(&peer_rc)));
 
                 return Some(peer_rc);
             }
@@ -334,6 +340,44 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     }
 }
 
+fn serialize_handshake_alpha_ack<'a>(
+    buffer: &'a mut [u8],
+    frame: &frame::HandshakeAlphaAckFrame,
+) -> &'a [u8] {
+    let mut wr =
+        frame::serial::FrameWriter::new(buffer, frame::FrameType::HandshakeAlphaAck).unwrap();
+
+    wr.write(frame);
+
+    return wr.finalize().into();
+}
+
+fn serialize_handshake_beta_ack<'a>(
+    buffer: &'a mut [u8],
+    frame: &frame::HandshakeBetaAckFrame,
+) -> &'a [u8] {
+    let mut wr =
+        frame::serial::FrameWriter::new(buffer, frame::FrameType::HandshakeBetaAck).unwrap();
+
+    wr.write(frame);
+
+    return wr.finalize().into();
+}
+
+fn compute_mac(
+    _siphash_key: u128,
+    _sender_addr: &net::SocketAddr,
+    _client_nonce: u32,
+    _server_nonce: u32,
+    _server_timestamp: u32,
+) -> u64 {
+    u64::max_value()
+}
+
+fn connection_params_compatible(a: &frame::ConnectionParams, b: &frame::ConnectionParams) -> bool {
+    a.packet_size_in_max >= b.packet_size_out_max && b.packet_size_in_max >= a.packet_size_out_max
+}
+
 impl ServerCore {
     /// Returns the number of whole milliseconds elapsed since the server object was created.
     fn time_now_ms(&self) -> u64 {
@@ -386,36 +430,112 @@ impl ServerCore {
         }
     }
 
-    fn handle_handshake_alpha(&self, sender_addr: &net::SocketAddr) {
-        println!("acking phase α...");
-        let _ = self.socket.send_to(&[0xA1], sender_addr);
+    fn handle_handshake_alpha(
+        &self,
+        mut rd: frame::serial::FrameReader,
+        sender_addr: &net::SocketAddr,
+    ) {
+        let now_ms = self.time_now_ms();
+
+        if let Some(frame) = rd.read::<frame::HandshakeAlphaFrame>() {
+            if frame.protocol_id == frame::serial::PROTOCOL_ID {
+                let server_params = frame::ConnectionParams {
+                    packet_size_in_max: u32::max_value(),
+                    packet_size_out_max: u32::max_value(),
+                };
+                let client_nonce = frame.client_nonce;
+                let server_nonce = rand::random::<u32>();
+                let server_timestamp = now_ms as u32;
+
+                let ref ack_frame = frame::HandshakeAlphaAckFrame {
+                    server_params,
+                    client_nonce,
+                    server_nonce,
+                    server_timestamp,
+                    server_mac: compute_mac(
+                        self.siphash_key,
+                        sender_addr,
+                        client_nonce,
+                        server_nonce,
+                        server_timestamp,
+                    ),
+                };
+
+                let ref mut buffer = [0u8; frame::serial::HANDSHAKE_ALPHA_ACK_SIZE
+                    + frame::serial::FRAME_OVERHEAD_SIZE];
+
+                let ack_frame_bytes = serialize_handshake_alpha_ack(buffer, ack_frame);
+
+                println!("acking phase α...");
+                let _ = self.socket.send_to(ack_frame_bytes, sender_addr);
+            }
+        }
     }
 
-    fn handle_handshake_beta(&mut self, sender_addr: &net::SocketAddr) {
-        if let Some(peer_rc) = self
-            .peer_table
-            .insert(sender_addr, Weak::clone(&self.self_weak))
-        {
-            let now_ms = self.time_now_ms();
+    fn handle_handshake_beta(
+        &mut self,
+        mut rd: frame::serial::FrameReader,
+        sender_addr: &net::SocketAddr,
+    ) {
+        let now_ms = self.time_now_ms();
 
-            let ref mut peer = *peer_rc.borrow_mut();
+        if let Some(frame) = rd.read::<frame::HandshakeBetaFrame>() {
+            let timestamp_now = now_ms as u32;
 
-            let ref mut endpoint = peer.endpoint;
-            let ref mut peer_core = peer.core;
-
-            let ref mut ctx = EndpointContext::new(self, peer_core, &peer_rc);
-
-            endpoint.init(now_ms, ctx);
-
-            println!(
-                "created peer {}, for sender address {:?}",
-                peer_core.id, sender_addr
+            let computed_mac = compute_mac(
+                self.siphash_key,
+                sender_addr,
+                frame.client_nonce,
+                frame.server_nonce,
+                frame.server_timestamp,
             );
-        }
 
-        // Always send an ack in case a previous ack was dropped.
-        println!("acking phase β...");
-        let _ = self.socket.send_to(&[0xB1], sender_addr);
+            let server_params = frame::ConnectionParams {
+                packet_size_in_max: u32::max_value(),
+                packet_size_out_max: u32::max_value(),
+            };
+
+            let mac_valid = frame.server_mac == computed_mac;
+            let timestamp_valid =
+                timestamp_now.wrapping_sub(frame.server_timestamp) < HANDSHAKE_TIMEOUT_MS;
+            let params_compatible =
+                connection_params_compatible(&frame.client_params, &server_params);
+
+            if mac_valid && timestamp_valid && params_compatible {
+                // TODO: Handle the case where the peer table is full!
+
+                if let Some(peer_rc) = self.peer_table.insert(sender_addr, &self.self_weak) {
+                    let now_ms = self.time_now_ms();
+
+                    let ref mut peer = *peer_rc.borrow_mut();
+
+                    let ref mut endpoint = peer.endpoint;
+                    let ref mut peer_core = peer.core;
+
+                    let ref mut ctx = EndpointContext::new(self, peer_core, &peer_rc);
+
+                    endpoint.init(now_ms, ctx);
+
+                    println!(
+                        "created peer {}, for sender address {:?}",
+                        peer_core.id, sender_addr
+                    );
+                }
+
+                // Always send an ack in case a previous ack was dropped.
+                let ref ack_frame = frame::HandshakeBetaAckFrame {
+                    client_nonce: frame.client_nonce,
+                };
+
+                let ref mut buffer = [0u8; frame::serial::HANDSHAKE_BETA_ACK_SIZE
+                    + frame::serial::FRAME_OVERHEAD_SIZE];
+
+                let ack_frame_bytes = serialize_handshake_beta_ack(buffer, ack_frame);
+
+                println!("acking phase β...");
+                let _ = self.socket.send_to(ack_frame_bytes, sender_addr);
+            }
+        }
     }
 
     fn handle_frame_other(&mut self, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
@@ -447,23 +567,17 @@ impl ServerCore {
             // an entry in the peer table is created. Other frame types are handled by the
             // associated peer object.
 
-            if frame_bytes == [0xA0] {
-                let valid = true;
-
-                if valid {
-                    self.handle_handshake_alpha(sender_addr);
-                }
-            } else if frame_bytes == [0xB0] {
-                let valid = true;
-
-                if valid {
-                    self.handle_handshake_beta(sender_addr);
-                }
-            } else {
-                let valid = true;
-
-                if valid {
-                    self.handle_frame_other(frame_bytes, sender_addr);
+            if let Some((rd, frame_type)) = frame::serial::FrameReader::new(frame_bytes) {
+                match frame_type {
+                    frame::FrameType::HandshakeAlpha => {
+                        self.handle_handshake_alpha(rd, sender_addr);
+                    }
+                    frame::FrameType::HandshakeBeta => {
+                        self.handle_handshake_beta(rd, sender_addr);
+                    }
+                    _ => {
+                        self.handle_frame_other(frame_bytes, sender_addr);
+                    }
                 }
             }
         } else {
@@ -524,6 +638,7 @@ impl Server {
             RefCell::new(ServerCore {
                 time_ref: time::Instant::now(),
                 socket: socket_rc,
+                siphash_key: u128::max_value(),
                 peer_table: PeerTable::new(peer_count_max),
                 timer_wheel: TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
                 events: VecDeque::new(),

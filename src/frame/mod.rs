@@ -2,9 +2,10 @@ pub mod serial;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum FrameType {
-    HandshakeSyn,
-    HandshakeSynAck,
-    HandshakeAck,
+    HandshakeAlpha,
+    HandshakeAlphaAck,
+    HandshakeBeta,
+    HandshakeBetaAck,
     Close,
     CloseAck,
     StreamSegment,
