@@ -5,6 +5,8 @@ use std::net;
 use std::rc::{Rc, Weak};
 use std::time;
 
+use siphasher::sip;
+
 use super::endpoint;
 use super::frame;
 use super::timer_wheel;
@@ -80,7 +82,7 @@ struct ServerCore {
     // Server socket
     socket: Rc<net::UdpSocket>,
     // Key used to compute handshake MACs
-    siphash_key: u128,
+    siphash_key: [u8; 16],
     // Table of connected peers
     peer_table: PeerTable,
     // Pending timer events
@@ -365,13 +367,32 @@ fn serialize_handshake_beta_ack<'a>(
 }
 
 fn compute_mac(
-    _siphash_key: u128,
-    _sender_addr: &net::SocketAddr,
-    _client_nonce: u32,
-    _server_nonce: u32,
-    _server_timestamp: u32,
+    key: &[u8; 16],
+    sender_addr: &net::SocketAddr,
+    client_nonce: u32,
+    server_nonce: u32,
+    server_timestamp: u32,
 ) -> u64 {
-    u64::max_value()
+    use core::hash::Hasher;
+
+    let mut hasher = sip::SipHasher13::new_with_key(key);
+
+    match sender_addr {
+        net::SocketAddr::V4(addr) => {
+            hasher.write(&addr.ip().octets());
+            hasher.write_u16(addr.port());
+        }
+        net::SocketAddr::V6(addr) => {
+            hasher.write(&addr.ip().octets());
+            hasher.write_u16(addr.port());
+        }
+    }
+
+    hasher.write_u32(client_nonce);
+    hasher.write_u32(server_nonce);
+    hasher.write_u32(server_timestamp);
+
+    return hasher.finish();
 }
 
 fn connection_params_compatible(a: &frame::ConnectionParams, b: &frame::ConnectionParams) -> bool {
@@ -453,7 +474,7 @@ impl ServerCore {
                     server_nonce,
                     server_timestamp,
                     server_mac: compute_mac(
-                        self.siphash_key,
+                        &self.siphash_key,
                         sender_addr,
                         client_nonce,
                         server_nonce,
@@ -483,7 +504,7 @@ impl ServerCore {
             let timestamp_now = now_ms as u32;
 
             let computed_mac = compute_mac(
-                self.siphash_key,
+                &self.siphash_key,
                 sender_addr,
                 frame.client_nonce,
                 frame.server_nonce,
@@ -629,6 +650,13 @@ impl Server {
 
         let receiver = SocketReceiver::new(Rc::clone(&socket_rc), frame_size_max)?;
 
+        // XXX TODO: CSPRNG!
+        let siphash_key = (0..16)
+            .map(|_| rand::random::<u8>())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+
         // In order to do interesting things with Peer objects, PeerHandles require Peers to keep a
         // (weak) pointer to the ServerCore. The most convenient way to accomplish this is to give
         // ServerCores a weak pointer which can be cloned upon Peer construction. The alternative
@@ -638,7 +666,7 @@ impl Server {
             RefCell::new(ServerCore {
                 time_ref: time::Instant::now(),
                 socket: socket_rc,
-                siphash_key: u128::max_value(),
+                siphash_key,
                 peer_table: PeerTable::new(peer_count_max),
                 timer_wheel: TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
                 events: VecDeque::new(),

@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 rand = "0.8.5"
 polling = "3.0.0"
+siphasher = "1"
