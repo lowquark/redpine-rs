@@ -647,33 +647,26 @@ impl Endpoint {
     where
         C: HostContext,
     {
-        let mut frame_writer =
-            frame::serial::FrameWriter::new(&mut self.tx_buffer, frame::FrameType::Close).unwrap();
+        use frame::serial::SimpleFrameWriter;
 
-        frame_writer.write(&frame::CloseFrame {
+        let frame = frame::CloseFrame {
             remote_nonce: self.remote_nonce,
-        });
+        };
 
-        let frame = frame_writer.finalize();
-
-        ctx.send_frame(frame);
+        ctx.send_frame(frame.write_into(&mut self.tx_buffer));
     }
 
     fn send_close_ack_frame<C>(&mut self, ctx: &mut C)
     where
         C: HostContext,
     {
-        let mut frame_writer =
-            frame::serial::FrameWriter::new(&mut self.tx_buffer, frame::FrameType::CloseAck)
-                .unwrap();
+        use frame::serial::SimpleFrameWriter;
 
-        frame_writer.write(&frame::CloseAckFrame {
+        let frame = frame::CloseAckFrame {
             remote_nonce: self.remote_nonce,
-        });
+        };
 
-        let frame = frame_writer.finalize();
-
-        ctx.send_frame(frame);
+        ctx.send_frame(frame.write_into(&mut self.tx_buffer));
     }
 
     pub fn disconnect<C>(&mut self, now_ms: u64, ctx: &mut C)

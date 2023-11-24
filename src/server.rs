@@ -342,30 +342,6 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     }
 }
 
-fn serialize_handshake_alpha_ack<'a>(
-    buffer: &'a mut [u8],
-    frame: &frame::HandshakeAlphaAckFrame,
-) -> &'a [u8] {
-    let mut wr =
-        frame::serial::FrameWriter::new(buffer, frame::FrameType::HandshakeAlphaAck).unwrap();
-
-    wr.write(frame);
-
-    return wr.finalize().into();
-}
-
-fn serialize_handshake_beta_ack<'a>(
-    buffer: &'a mut [u8],
-    frame: &frame::HandshakeBetaAckFrame,
-) -> &'a [u8] {
-    let mut wr =
-        frame::serial::FrameWriter::new(buffer, frame::FrameType::HandshakeBetaAck).unwrap();
-
-    wr.write(frame);
-
-    return wr.finalize().into();
-}
-
 fn compute_mac(
     key: &[u8; 16],
     sender_addr: &net::SocketAddr,
@@ -482,13 +458,14 @@ impl ServerCore {
                     ),
                 };
 
-                let ref mut buffer = [0u8; frame::serial::HANDSHAKE_ALPHA_ACK_SIZE
-                    + frame::serial::FRAME_OVERHEAD_SIZE];
+                use frame::serial::SimpleFrame;
+                use frame::serial::SimpleFrameWriter;
 
-                let ack_frame_bytes = serialize_handshake_alpha_ack(buffer, ack_frame);
+                let ref mut buffer = [0u8; frame::HandshakeAlphaAckFrame::FRAME_SIZE];
+                let ack_frame_bytes = ack_frame.write_into(buffer);
 
                 println!("acking phase α...");
-                let _ = self.socket.send_to(ack_frame_bytes, sender_addr);
+                let _ = self.socket.send_to(&ack_frame_bytes, sender_addr);
             }
         }
     }
@@ -548,13 +525,14 @@ impl ServerCore {
                     client_nonce: frame.client_nonce,
                 };
 
-                let ref mut buffer = [0u8; frame::serial::HANDSHAKE_BETA_ACK_SIZE
-                    + frame::serial::FRAME_OVERHEAD_SIZE];
+                use frame::serial::SimpleFrame;
+                use frame::serial::SimpleFrameWriter;
 
-                let ack_frame_bytes = serialize_handshake_beta_ack(buffer, ack_frame);
+                let ref mut buffer = [0u8; frame::HandshakeBetaAckFrame::FRAME_SIZE];
+                let ack_frame_bytes = ack_frame.write_into(buffer);
 
                 println!("acking phase β...");
-                let _ = self.socket.send_to(ack_frame_bytes, sender_addr);
+                let _ = self.socket.send_to(&ack_frame_bytes, sender_addr);
             }
         }
     }

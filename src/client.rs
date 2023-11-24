@@ -207,28 +207,6 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     }
 }
 
-fn serialize_handshake_alpha(frame: &frame::HandshakeAlphaFrame) -> Box<[u8]> {
-    let ref mut buffer =
-        [0u8; frame::serial::HANDSHAKE_ALPHA_SIZE + frame::serial::FRAME_OVERHEAD_SIZE];
-
-    let mut wr = frame::serial::FrameWriter::new(buffer, frame::FrameType::HandshakeAlpha).unwrap();
-
-    wr.write(frame);
-
-    return wr.finalize().into();
-}
-
-fn serialize_handshake_beta(frame: &frame::HandshakeBetaFrame) -> Box<[u8]> {
-    let ref mut buffer =
-        [0u8; frame::serial::HANDSHAKE_BETA_SIZE + frame::serial::FRAME_OVERHEAD_SIZE];
-
-    let mut wr = frame::serial::FrameWriter::new(buffer, frame::FrameType::HandshakeBeta).unwrap();
-
-    wr.write(frame);
-
-    return wr.finalize().into();
-}
-
 fn connection_params_compatible(a: &frame::ConnectionParams, b: &frame::ConnectionParams) -> bool {
     a.packet_size_in_max >= b.packet_size_out_max && b.packet_size_in_max >= a.packet_size_out_max
 }
@@ -354,14 +332,15 @@ impl ClientCore {
                                     self.timers.rto_timer.timeout_ms =
                                         Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
 
-                                    state.frame =
-                                        serialize_handshake_beta(&frame::HandshakeBetaFrame {
-                                            client_params,
-                                            client_nonce: frame.client_nonce,
-                                            server_nonce: frame.server_nonce,
-                                            server_timestamp: frame.server_timestamp,
-                                            server_mac: frame.server_mac,
-                                        });
+                                    use frame::serial::SimpleFrameWriter;
+                                    state.frame = frame::HandshakeBetaFrame {
+                                        client_params,
+                                        client_nonce: frame.client_nonce,
+                                        server_nonce: frame.server_nonce,
+                                        server_timestamp: frame.server_timestamp,
+                                        server_mac: frame.server_mac,
+                                    }
+                                    .write();
 
                                     println!("requesting phase β...");
                                     let _ = self.socket.send(&state.frame);
@@ -518,10 +497,13 @@ impl Client {
 
         let local_nonce = rand::random::<u32>();
 
-        let handshake_frame = serialize_handshake_alpha(&frame::HandshakeAlphaFrame {
+        use frame::serial::SimpleFrameWriter;
+
+        let handshake_frame = frame::HandshakeAlphaFrame {
             protocol_id: frame::serial::PROTOCOL_ID,
             client_nonce: local_nonce,
-        });
+        }
+        .write();
 
         println!("requesting phase α...");
         let _ = socket_rc.send(&handshake_frame);

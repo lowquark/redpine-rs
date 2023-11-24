@@ -637,6 +637,66 @@ impl<'a> EzReader<'a> {
     }
 }
 
+pub trait SimpleFrame {
+    const FRAME_TYPE: FrameType;
+    const FRAME_SIZE: usize;
+}
+
+impl SimpleFrame for HandshakeAlphaFrame {
+    const FRAME_TYPE: FrameType = FrameType::HandshakeAlpha;
+    const FRAME_SIZE: usize = HANDSHAKE_ALPHA_SIZE + FRAME_OVERHEAD_SIZE;
+}
+
+impl SimpleFrame for HandshakeAlphaAckFrame {
+    const FRAME_TYPE: FrameType = FrameType::HandshakeAlphaAck;
+    const FRAME_SIZE: usize = HANDSHAKE_ALPHA_ACK_SIZE + FRAME_OVERHEAD_SIZE;
+}
+
+impl SimpleFrame for HandshakeBetaFrame {
+    const FRAME_TYPE: FrameType = FrameType::HandshakeBeta;
+    const FRAME_SIZE: usize = HANDSHAKE_BETA_SIZE + FRAME_OVERHEAD_SIZE;
+}
+
+impl SimpleFrame for HandshakeBetaAckFrame {
+    const FRAME_TYPE: FrameType = FrameType::HandshakeBetaAck;
+    const FRAME_SIZE: usize = HANDSHAKE_BETA_ACK_SIZE + FRAME_OVERHEAD_SIZE;
+}
+
+impl SimpleFrame for CloseFrame {
+    const FRAME_TYPE: FrameType = FrameType::Close;
+    const FRAME_SIZE: usize = HANDSHAKE_BETA_SIZE + FRAME_OVERHEAD_SIZE;
+}
+
+impl SimpleFrame for CloseAckFrame {
+    const FRAME_TYPE: FrameType = FrameType::CloseAck;
+    const FRAME_SIZE: usize = HANDSHAKE_BETA_ACK_SIZE + FRAME_OVERHEAD_SIZE;
+}
+
+pub trait SimpleFrameWriter {
+    fn write(&self) -> Box<[u8]>;
+    fn write_into<'a>(&self, dst: &'a mut [u8]) -> &'a [u8];
+}
+
+impl<T> SimpleFrameWriter for T
+where
+    T: SimpleFrame + BlockSerial,
+{
+    fn write(&self) -> Box<[u8]> {
+        let mut buffer = vec![0; Self::FRAME_SIZE].into_boxed_slice();
+        let mut wr = FrameWriter::new(&mut buffer, Self::FRAME_TYPE).unwrap();
+        wr.write(self);
+        wr.finalize();
+        buffer
+    }
+
+    fn write_into<'a>(&self, dst: &'a mut [u8]) -> &'a [u8] {
+        debug_assert!(dst.len() >= Self::FRAME_SIZE);
+        let mut wr = FrameWriter::new(dst, Self::FRAME_TYPE).unwrap();
+        wr.write(self);
+        return wr.finalize();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
