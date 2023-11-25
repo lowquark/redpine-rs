@@ -526,13 +526,14 @@ impl<'a> FrameWriter<'a> {
     pub fn finalize(self) -> &'a [u8] {
         // TODO: Compute CRC
 
-        let mut wr = Writer::new(&mut self.buffer[self.write_idx..]);
+        let ref payload = self.buffer[..self.write_idx];
 
-        unsafe {
-            wr.write_u32(0x00000000);
-        }
+        let frame_crc = crc::compute(payload);
+        let ref frame_crc_bytes = frame_crc.to_le_bytes();
 
-        let frame_size = self.write_idx + FRAME_CRC_SIZE;
+        let frame_size = self.write_idx + crc::SIZE;
+
+        self.buffer[self.write_idx..frame_size].copy_from_slice(frame_crc_bytes);
 
         &self.buffer[..frame_size]
     }
@@ -639,39 +640,91 @@ impl<'a> EzReader<'a> {
     }
 }
 
+pub fn check_size(frame_bytes: &[u8]) -> bool {
+    frame_bytes.len() >= FRAME_OVERHEAD_SIZE
+}
+
+pub fn read_type(frame_bytes: &[u8]) -> Option<FrameType> {
+    debug_assert!(check_size(frame_bytes));
+
+    let frame_type = match frame_bytes[0] & FRAME_TYPE_MASK {
+        FRAME_TYPE_HANDSHAKE_ALPHA => FrameType::HandshakeAlpha,
+        FRAME_TYPE_HANDSHAKE_ALPHA_ACK => FrameType::HandshakeAlphaAck,
+        FRAME_TYPE_HANDSHAKE_BETA => FrameType::HandshakeBeta,
+        FRAME_TYPE_HANDSHAKE_BETA_ACK => FrameType::HandshakeBetaAck,
+        FRAME_TYPE_CLOSE => FrameType::Close,
+        FRAME_TYPE_CLOSE_ACK => FrameType::CloseAck,
+        FRAME_TYPE_STREAM_SEGMENT => FrameType::StreamSegment,
+        FRAME_TYPE_STREAM_ACK => FrameType::StreamAck,
+        FRAME_TYPE_STREAM_SEGMENT_ACK => FrameType::StreamSegmentAck,
+        FRAME_TYPE_STREAM_SYNC => FrameType::StreamSync,
+        _ => return None,
+    };
+
+    Some(frame_type)
+}
+
+pub fn verify_crc(frame_bytes: &[u8]) -> bool {
+    debug_assert!(check_size(frame_bytes));
+
+    let ref data_bytes = frame_bytes[..frame_bytes.len() - crc::SIZE];
+
+    let mut crc_bytes = [0u8; crc::SIZE];
+    crc_bytes.copy_from_slice(&frame_bytes[frame_bytes.len() - crc::SIZE..]);
+    let frame_crc = u32::from_le_bytes(crc_bytes);
+
+    crc::compute(data_bytes) == frame_crc
+}
+
+pub fn payload(frame_bytes: &[u8]) -> &[u8] {
+    debug_assert!(check_size(frame_bytes));
+
+    let payload_begin = FRAME_HEADER_SIZE;
+    let payload_end = frame_bytes.len() - FRAME_CRC_SIZE;
+
+    &frame_bytes[payload_begin..payload_end]
+}
+
 pub trait SimpleFrame {
     const FRAME_TYPE: FrameType;
     const FRAME_SIZE: usize;
+    const PAYLOAD_SIZE: usize;
 }
 
 impl SimpleFrame for HandshakeAlphaFrame {
     const FRAME_TYPE: FrameType = FrameType::HandshakeAlpha;
-    const FRAME_SIZE: usize = HANDSHAKE_ALPHA_SIZE + FRAME_OVERHEAD_SIZE;
+    const FRAME_SIZE: usize = Self::PAYLOAD_SIZE + FRAME_OVERHEAD_SIZE;
+    const PAYLOAD_SIZE: usize = HANDSHAKE_ALPHA_SIZE;
 }
 
 impl SimpleFrame for HandshakeAlphaAckFrame {
     const FRAME_TYPE: FrameType = FrameType::HandshakeAlphaAck;
-    const FRAME_SIZE: usize = HANDSHAKE_ALPHA_ACK_SIZE + FRAME_OVERHEAD_SIZE;
+    const FRAME_SIZE: usize = Self::PAYLOAD_SIZE + FRAME_OVERHEAD_SIZE;
+    const PAYLOAD_SIZE: usize = HANDSHAKE_ALPHA_ACK_SIZE;
 }
 
 impl SimpleFrame for HandshakeBetaFrame {
     const FRAME_TYPE: FrameType = FrameType::HandshakeBeta;
-    const FRAME_SIZE: usize = HANDSHAKE_BETA_SIZE + FRAME_OVERHEAD_SIZE;
+    const FRAME_SIZE: usize = Self::PAYLOAD_SIZE + FRAME_OVERHEAD_SIZE;
+    const PAYLOAD_SIZE: usize = HANDSHAKE_BETA_SIZE;
 }
 
 impl SimpleFrame for HandshakeBetaAckFrame {
     const FRAME_TYPE: FrameType = FrameType::HandshakeBetaAck;
-    const FRAME_SIZE: usize = HANDSHAKE_BETA_ACK_SIZE + FRAME_OVERHEAD_SIZE;
+    const FRAME_SIZE: usize = Self::PAYLOAD_SIZE + FRAME_OVERHEAD_SIZE;
+    const PAYLOAD_SIZE: usize = HANDSHAKE_BETA_ACK_SIZE;
 }
 
 impl SimpleFrame for CloseFrame {
     const FRAME_TYPE: FrameType = FrameType::Close;
-    const FRAME_SIZE: usize = HANDSHAKE_BETA_SIZE + FRAME_OVERHEAD_SIZE;
+    const FRAME_SIZE: usize = Self::PAYLOAD_SIZE + FRAME_OVERHEAD_SIZE;
+    const PAYLOAD_SIZE: usize = HANDSHAKE_BETA_SIZE;
 }
 
 impl SimpleFrame for CloseAckFrame {
     const FRAME_TYPE: FrameType = FrameType::CloseAck;
-    const FRAME_SIZE: usize = HANDSHAKE_BETA_ACK_SIZE + FRAME_OVERHEAD_SIZE;
+    const FRAME_SIZE: usize = Self::PAYLOAD_SIZE + FRAME_OVERHEAD_SIZE;
+    const PAYLOAD_SIZE: usize = HANDSHAKE_BETA_ACK_SIZE;
 }
 
 pub trait SimpleFrameWriter {
@@ -696,6 +749,21 @@ where
         let mut wr = FrameWriter::new(dst, Self::FRAME_TYPE).unwrap();
         wr.write(self);
         return wr.finalize();
+    }
+}
+
+pub trait SimplePayloadReader {
+    fn read(src: &[u8]) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+impl<T> SimplePayloadReader for T
+where
+    T: SimpleFrame + BlockSerial,
+{
+    fn read(src: &[u8]) -> Option<Self> {
+        EzReader::new(src).read::<Self>()
     }
 }
 

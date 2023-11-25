@@ -429,12 +429,13 @@ impl ServerCore {
 
     fn handle_handshake_alpha(
         &self,
-        mut rd: frame::serial::FrameReader,
+        payload_bytes: &[u8],
         sender_addr: &net::SocketAddr,
+        now_ms: u64,
     ) {
-        let now_ms = self.time_now_ms();
+        use frame::serial::SimplePayloadReader;
 
-        if let Some(frame) = rd.read::<frame::HandshakeAlphaFrame>() {
+        if let Some(frame) = frame::HandshakeAlphaFrame::read(payload_bytes) {
             if frame.protocol_id == frame::serial::PROTOCOL_ID {
                 let server_params = frame::ConnectionParams {
                     packet_size_in_max: u32::max_value(),
@@ -472,12 +473,13 @@ impl ServerCore {
 
     fn handle_handshake_beta(
         &mut self,
-        mut rd: frame::serial::FrameReader,
+        payload_bytes: &[u8],
         sender_addr: &net::SocketAddr,
+        now_ms: u64,
     ) {
-        let now_ms = self.time_now_ms();
+        use frame::serial::SimplePayloadReader;
 
-        if let Some(frame) = rd.read::<frame::HandshakeBetaFrame>() {
+        if let Some(frame) = frame::HandshakeBetaFrame::read(payload_bytes) {
             let timestamp_now = now_ms as u32;
 
             let computed_mac = compute_mac(
@@ -537,9 +539,12 @@ impl ServerCore {
         }
     }
 
-    fn handle_frame_other(&mut self, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
-        let now_ms = self.time_now_ms();
-
+    fn handle_frame_other(
+        &mut self,
+        frame_bytes: &[u8],
+        sender_addr: &net::SocketAddr,
+        now_ms: u64,
+    ) {
         // If a peer is associated with this address, deliver this frame to its endpoint
         if let Some(peer_rc) = self.peer_table.find(sender_addr) {
             let peer_rc = Rc::clone(&peer_rc);
@@ -558,29 +563,38 @@ impl ServerCore {
     fn handle_frame(&mut self, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
         // println!("{:?} -> {:02X?}", sender_addr, frame_bytes);
 
-        let crc_valid = true;
+        if !frame::serial::check_size(frame_bytes) {
+            return;
+        }
 
-        if crc_valid {
+        if let Some(frame_type) = frame::serial::read_type(frame_bytes) {
+            if !frame::serial::verify_crc(frame_bytes) {
+                // We don't negotiate with entropy
+                return;
+            }
+
             // Initial handshakes are handled without an allocation in the peer table. Once a valid
             // open request is received, the sender's address is assumed valid (i.e. blockable) and
             // an entry in the peer table is created. Other frame types are handled by the
             // associated peer object.
 
-            if let Some((rd, frame_type)) = frame::serial::FrameReader::new(frame_bytes) {
-                match frame_type {
-                    frame::FrameType::HandshakeAlpha => {
-                        self.handle_handshake_alpha(rd, sender_addr);
-                    }
-                    frame::FrameType::HandshakeBeta => {
-                        self.handle_handshake_beta(rd, sender_addr);
-                    }
-                    _ => {
-                        self.handle_frame_other(frame_bytes, sender_addr);
-                    }
+            let payload = frame::serial::payload(frame_bytes);
+
+            let now_ms = self.time_now_ms();
+
+            match frame_type {
+                frame::FrameType::HandshakeAlpha => {
+                    self.handle_handshake_alpha(payload, sender_addr, now_ms);
+                }
+                frame::FrameType::HandshakeBeta => {
+                    self.handle_handshake_beta(payload, sender_addr, now_ms);
+                }
+                _ => {
+                    self.handle_frame_other(frame_bytes, sender_addr, now_ms);
+                    // TODO:
+                    // self.handle_frame_other(frame_type, payload, sender_addr, now_ms);
                 }
             }
-        } else {
-            // We don't negotiate with entropy
         }
     }
 
