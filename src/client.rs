@@ -390,7 +390,12 @@ impl ClientCore {
         }
     }
 
-    fn handle_frame_other(&mut self, frame_bytes: &[u8], now_ms: u64) {
+    fn handle_frame_other(
+        &mut self,
+        frame_type: frame::FrameType,
+        payload_bytes: &[u8],
+        now_ms: u64,
+    ) {
         match self.state {
             State::Active(ref mut state) => {
                 let endpoint_rc = Rc::clone(&state.endpoint_rc);
@@ -399,15 +404,13 @@ impl ClientCore {
 
                 endpoint_rc
                     .borrow_mut()
-                    .handle_frame(frame_bytes, now_ms, host_ctx);
+                    .handle_frame(frame_type, payload_bytes, now_ms, host_ctx);
             }
             _ => (),
         }
     }
 
     fn handle_frame(&mut self, frame_bytes: &[u8]) {
-        let now_ms = self.time_now_ms();
-
         // println!(" -> {:02X?}", frame_bytes);
 
         if !frame::serial::check_size(frame_bytes) {
@@ -420,19 +423,19 @@ impl ClientCore {
                 return;
             }
 
-            let payload = frame::serial::payload(frame_bytes);
+            let payload_bytes = frame::serial::payload(frame_bytes);
+
+            let now_ms = self.time_now_ms();
 
             match frame_type {
                 frame::FrameType::HandshakeAlphaAck => {
-                    self.handle_handshake_alpha_ack(payload, now_ms);
+                    self.handle_handshake_alpha_ack(payload_bytes, now_ms);
                 }
                 frame::FrameType::HandshakeBetaAck => {
-                    self.handle_handshake_beta_ack(payload, now_ms);
+                    self.handle_handshake_beta_ack(payload_bytes, now_ms);
                 }
                 _ => {
-                    self.handle_frame_other(frame_bytes, now_ms);
-                    // TODO:
-                    // self.handle_frame_other(frame_type, payload, now_ms);
+                    self.handle_frame_other(frame_type, payload_bytes, now_ms);
                 }
             }
         }

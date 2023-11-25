@@ -539,71 +539,6 @@ impl<'a> FrameWriter<'a> {
     }
 }
 
-pub struct FrameReader<'a> {
-    buffer: &'a [u8],
-    read_idx: usize,
-}
-
-impl<'a> FrameReader<'a> {
-    pub fn new(buffer: &'a [u8]) -> Option<(Self, FrameType)> {
-        if buffer.len() < FRAME_HEADER_SIZE + FRAME_CRC_SIZE {
-            return None;
-        }
-
-        let mut rd = Reader::new(buffer);
-
-        let type_bits = unsafe { rd.read_u8() } & FRAME_TYPE_MASK;
-
-        let frame_type = match type_bits {
-            FRAME_TYPE_HANDSHAKE_ALPHA => FrameType::HandshakeAlpha,
-            FRAME_TYPE_HANDSHAKE_ALPHA_ACK => FrameType::HandshakeAlphaAck,
-            FRAME_TYPE_HANDSHAKE_BETA => FrameType::HandshakeBeta,
-            FRAME_TYPE_HANDSHAKE_BETA_ACK => FrameType::HandshakeBetaAck,
-            FRAME_TYPE_CLOSE => FrameType::Close,
-            FRAME_TYPE_CLOSE_ACK => FrameType::CloseAck,
-            FRAME_TYPE_STREAM_SEGMENT => FrameType::StreamSegment,
-            FRAME_TYPE_STREAM_ACK => FrameType::StreamAck,
-            FRAME_TYPE_STREAM_SEGMENT_ACK => FrameType::StreamSegmentAck,
-            FRAME_TYPE_STREAM_SYNC => FrameType::StreamSync,
-            _ => return None,
-        };
-
-        debug_assert_eq!(rd.bytes_read(), FRAME_HEADER_SIZE);
-
-        // TODO: Validate CRC
-
-        Some((
-            Self {
-                buffer,
-                read_idx: FRAME_HEADER_SIZE,
-            },
-            frame_type,
-        ))
-    }
-
-    pub fn read<A>(&mut self) -> Option<A>
-    where
-        A: Serial<'a>,
-    {
-        let begin_idx = self.read_idx;
-        let end_idx = self.buffer.len() - FRAME_CRC_SIZE;
-
-        if let Some((obj, size)) = A::read(&self.buffer[begin_idx..end_idx]) {
-            self.read_idx += size;
-            return Some(obj);
-        }
-
-        return None;
-    }
-
-    pub fn remaining_bytes(&self) -> &[u8] {
-        let begin_idx = self.read_idx;
-        let end_idx = self.buffer.len() - FRAME_CRC_SIZE;
-
-        &self.buffer[begin_idx..end_idx]
-    }
-}
-
 pub struct EzReader<'a> {
     buffer: &'a [u8],
     read_idx: usize,
@@ -822,9 +757,11 @@ mod tests {
 
             let frame = writer.finalize();
 
-            let (mut reader, frame_type) = serial::FrameReader::new(frame).unwrap();
+            assert!(check_size(frame));
+            assert!(verify_crc(frame));
+            assert_eq!(read_type(frame), Some(FrameType::StreamSegment));
 
-            assert_eq!(frame_type, FrameType::StreamSegment);
+            let mut reader = serial::EzReader::new(payload(frame));
 
             for i in 0..datagram_count {
                 let dg = reader.read::<Datagram>().unwrap();
@@ -833,7 +770,7 @@ mod tests {
                 assert_eq!(dg.unrel, datagrams[i].unrel);
                 assert_eq!(dg.first, datagrams[i].first);
                 assert_eq!(dg.last, datagrams[i].last);
-                // assert_eq!(dg.data, datagrams[i].data.as_ref());
+                assert_eq!(dg.data, datagrams[i].data.as_ref());
             }
 
             assert!(reader.read::<Datagram>().is_none());

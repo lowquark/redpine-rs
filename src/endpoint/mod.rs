@@ -279,7 +279,7 @@ impl Endpoint {
 
     fn handle_stream_frame<C>(
         &mut self,
-        mut frame_reader: frame::serial::FrameReader,
+        mut frame_reader: frame::serial::EzReader,
         frame_type: frame::FrameType,
         now_ms: u64,
         ctx: &mut C,
@@ -379,7 +379,7 @@ impl Endpoint {
         self.flush_stream(ack_unrel, ack_rel, now_ms, ctx);
     }
 
-    fn validate_close_frame(&self, mut frame_reader: frame::serial::FrameReader) -> bool {
+    fn validate_close_frame(&self, mut frame_reader: frame::serial::EzReader) -> bool {
         if let Some(frame) = frame_reader.read::<frame::CloseFrame>() {
             frame.remote_nonce == self.local_nonce
         } else {
@@ -387,7 +387,7 @@ impl Endpoint {
         }
     }
 
-    fn validate_close_ack_frame(&self, mut frame_reader: frame::serial::FrameReader) -> bool {
+    fn validate_close_ack_frame(&self, mut frame_reader: frame::serial::EzReader) -> bool {
         if let Some(frame) = frame_reader.read::<frame::CloseAckFrame>() {
             frame.remote_nonce == self.local_nonce
         } else {
@@ -395,72 +395,77 @@ impl Endpoint {
         }
     }
 
-    pub fn handle_frame<C>(&mut self, frame_bytes: &[u8], now_ms: u64, ctx: &mut C)
-    where
+    pub fn handle_frame<C>(
+        &mut self,
+        frame_type: frame::FrameType,
+        payload_bytes: &[u8],
+        now_ms: u64,
+        ctx: &mut C,
+    ) where
         C: HostContext,
     {
-        if let Some((frame_reader, frame_type)) = frame::serial::FrameReader::new(frame_bytes) {
-            match self.state_id {
-                StateId::Active => match frame_type {
-                    frame::FrameType::StreamSegment
-                    | frame::FrameType::StreamAck
-                    | frame::FrameType::StreamSegmentAck => {
-                        self.handle_stream_frame(frame_reader, frame_type, now_ms, ctx)
-                    }
-                    frame::FrameType::Close => {
-                        if self.validate_close_frame(frame_reader) {
-                            // Acknowledge
-                            self.send_close_ack_frame(ctx);
+        let frame_reader = frame::serial::EzReader::new(payload_bytes);
 
-                            // Unset to prevent spurious timer event
-                            ctx.unset_timer(TimerName::Rto);
-                            // Set to ensure eventual destruction
-                            ctx.set_timer(TimerName::Receive, now_ms + DISCONNECT_TIMEOUT_MS);
+        match self.state_id {
+            StateId::Active => match frame_type {
+                frame::FrameType::StreamSegment
+                | frame::FrameType::StreamAck
+                | frame::FrameType::StreamSegmentAck => {
+                    self.handle_stream_frame(frame_reader, frame_type, now_ms, ctx)
+                }
+                frame::FrameType::Close => {
+                    if self.validate_close_frame(frame_reader) {
+                        // Acknowledge
+                        self.send_close_ack_frame(ctx);
 
-                            // We are now disconnected
-                            self.state_id = StateId::Closed;
-                            ctx.on_disconnect();
-                        }
-                    }
-                    _ => (),
-                },
-                StateId::Closing => match frame_type {
-                    frame::FrameType::Close => {
-                        if self.validate_close_frame(frame_reader) {
-                            // Acknowledge
-                            self.send_close_ack_frame(ctx);
+                        // Unset to prevent spurious timer event
+                        ctx.unset_timer(TimerName::Rto);
+                        // Set to ensure eventual destruction
+                        ctx.set_timer(TimerName::Receive, now_ms + DISCONNECT_TIMEOUT_MS);
 
-                            // Unset to prevent spurious timer event
-                            ctx.unset_timer(TimerName::Rto);
-
-                            // We are now disconnected
-                            self.state_id = StateId::Closed;
-                            ctx.on_disconnect();
-                        }
+                        // We are now disconnected
+                        self.state_id = StateId::Closed;
+                        ctx.on_disconnect();
                     }
-                    frame::FrameType::CloseAck => {
-                        if self.validate_close_ack_frame(frame_reader) {
-                            // Unset to prevent spurious timer event
-                            ctx.unset_timer(TimerName::Rto);
-
-                            // We are now disconnected
-                            self.state_id = StateId::Closed;
-                            ctx.on_disconnect();
-                        }
-                    }
-                    _ => (),
-                },
-                StateId::Closed => match frame_type {
-                    frame::FrameType::Close => {
-                        if self.validate_close_frame(frame_reader) {
-                            // Acknowledge further requests until destruction
-                            self.send_close_ack_frame(ctx);
-                        }
-                    }
-                    _ => (),
-                },
+                }
                 _ => (),
-            }
+            },
+            StateId::Closing => match frame_type {
+                frame::FrameType::Close => {
+                    if self.validate_close_frame(frame_reader) {
+                        // Acknowledge
+                        self.send_close_ack_frame(ctx);
+
+                        // Unset to prevent spurious timer event
+                        ctx.unset_timer(TimerName::Rto);
+
+                        // We are now disconnected
+                        self.state_id = StateId::Closed;
+                        ctx.on_disconnect();
+                    }
+                }
+                frame::FrameType::CloseAck => {
+                    if self.validate_close_ack_frame(frame_reader) {
+                        // Unset to prevent spurious timer event
+                        ctx.unset_timer(TimerName::Rto);
+
+                        // We are now disconnected
+                        self.state_id = StateId::Closed;
+                        ctx.on_disconnect();
+                    }
+                }
+                _ => (),
+            },
+            StateId::Closed => match frame_type {
+                frame::FrameType::Close => {
+                    if self.validate_close_frame(frame_reader) {
+                        // Acknowledge further requests until destruction
+                        self.send_close_ack_frame(ctx);
+                    }
+                }
+                _ => (),
+            },
+            _ => (),
         }
     }
 

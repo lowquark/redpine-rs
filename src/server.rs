@@ -541,7 +541,8 @@ impl ServerCore {
 
     fn handle_frame_other(
         &mut self,
-        frame_bytes: &[u8],
+        frame_type: frame::FrameType,
+        payload_bytes: &[u8],
         sender_addr: &net::SocketAddr,
         now_ms: u64,
     ) {
@@ -556,7 +557,7 @@ impl ServerCore {
 
             let ref mut ctx = EndpointContext::new(self, peer_core, &peer_rc);
 
-            endpoint.handle_frame(frame_bytes, now_ms, ctx);
+            endpoint.handle_frame(frame_type, payload_bytes, now_ms, ctx);
         }
     }
 
@@ -578,21 +579,19 @@ impl ServerCore {
             // an entry in the peer table is created. Other frame types are handled by the
             // associated peer object.
 
-            let payload = frame::serial::payload(frame_bytes);
+            let payload_bytes = frame::serial::payload(frame_bytes);
 
             let now_ms = self.time_now_ms();
 
             match frame_type {
                 frame::FrameType::HandshakeAlpha => {
-                    self.handle_handshake_alpha(payload, sender_addr, now_ms);
+                    self.handle_handshake_alpha(payload_bytes, sender_addr, now_ms);
                 }
                 frame::FrameType::HandshakeBeta => {
-                    self.handle_handshake_beta(payload, sender_addr, now_ms);
+                    self.handle_handshake_beta(payload_bytes, sender_addr, now_ms);
                 }
                 _ => {
-                    self.handle_frame_other(frame_bytes, sender_addr, now_ms);
-                    // TODO:
-                    // self.handle_frame_other(frame_type, payload, sender_addr, now_ms);
+                    self.handle_frame_other(frame_type, payload_bytes, sender_addr, now_ms);
                 }
             }
         }
