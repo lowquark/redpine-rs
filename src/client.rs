@@ -6,17 +6,8 @@ use std::time;
 
 use super::endpoint;
 use super::frame;
+use super::socket;
 use super::SendMode;
-
-struct SocketReceiver {
-    // Reference to non-blocking, connected, server socket
-    socket: Rc<net::UdpSocket>,
-    // Always-allocated receive buffer
-    recv_buffer: Box<[u8]>,
-    // Polling objects
-    poller: polling::Poller,
-    poller_events: polling::Events,
-}
 
 type EndpointRc = Rc<RefCell<endpoint::Endpoint>>;
 
@@ -67,8 +58,8 @@ struct EndpointContext<'a> {
 struct ClientCore {
     // Timestamps are computed relative to this instant
     time_ref: time::Instant,
-    // Client socket
-    socket: Rc<net::UdpSocket>,
+    // Socket send handle
+    socket_tx: socket::ConnectedSocketTx,
     // Current mode of operation
     state: State,
     // Pending timer events
@@ -80,73 +71,12 @@ struct ClientCore {
 pub struct Client {
     // Interesting client data
     core: ClientCore,
-    // Permits both blocking and non-blocking reads from a non-blocking socket
-    receiver: SocketReceiver,
-    // Cached from socket initialization
-    local_addr: net::SocketAddr,
-    peer_addr: net::SocketAddr,
+    // Socket receive handle
+    socket_rx: socket::ConnectedSocketRx,
 }
-
-const SOCKET_POLLING_KEY: usize = 0;
 
 const HANDSHAKE_RESEND_TIMEOUT_MS: u64 = 2000;
 const HANDSHAKE_TIMEOUT_MS: u64 = 10000;
-
-impl SocketReceiver {
-    fn new(socket: Rc<net::UdpSocket>, frame_size_max: usize) -> std::io::Result<Self> {
-        let poller = polling::Poller::new()?;
-
-        unsafe {
-            poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
-        }
-
-        Ok(Self {
-            socket,
-            recv_buffer: vec![0; frame_size_max].into_boxed_slice(),
-            poller,
-            poller_events: polling::Events::new(),
-        })
-    }
-
-    /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
-    /// otherwise.
-    pub fn try_read_frame<'a>(&'a mut self) -> std::io::Result<Option<&'a [u8]>> {
-        match self.socket.recv(&mut self.recv_buffer) {
-            Ok(frame_len) => {
-                let ref frame_bytes = self.recv_buffer[..frame_len];
-                Ok(Some(frame_bytes))
-            }
-            Err(err) => match err.kind() {
-                // The only acceptable error is WouldBlock, indicating no packet
-                std::io::ErrorKind::WouldBlock => Ok(None),
-                _ => Err(err),
-            },
-        }
-    }
-
-    /// Blocks for a duration of up to `timeout` for an incoming frame and returns it. Returns
-    /// Ok(None) if no frame could be read in the alloted time, or if polling awoke spuriously.
-    pub fn wait_for_frame<'a>(
-        &'a mut self,
-        timeout: Option<time::Duration>,
-    ) -> std::io::Result<Option<&'a [u8]>> {
-        // Wait for a readable event (must be done prior to each wait() call)
-        // TODO: Does this work if the socket is already readable?
-        self.poller
-            .modify(&*self.socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
-
-        self.poller_events.clear();
-
-        let n = self.poller.wait(&mut self.poller_events, timeout)?;
-
-        if n > 0 {
-            // The socket is readable - read in confidence
-            self.try_read_frame()
-        } else {
-            Ok(None)
-        }
-    }
-}
 
 impl<'a> EndpointContext<'a> {
     fn new(client: &'a mut ClientCore) -> Self {
@@ -157,7 +87,7 @@ impl<'a> EndpointContext<'a> {
 impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn send_frame(&mut self, frame_bytes: &[u8]) {
         // println!(" <- {:02X?}", frame_bytes);
-        let _ = self.client.socket.send(frame_bytes);
+        self.client.socket_tx.send(frame_bytes);
     }
 
     fn set_timer(&mut self, timer: endpoint::TimerName, time_ms: u64) {
@@ -258,11 +188,11 @@ impl ClientCore {
                             match state.phase {
                                 HandshakePhase::Alpha => {
                                     println!("re-requesting phase α...");
-                                    let _ = self.socket.send(&state.frame);
+                                    self.socket_tx.send(&state.frame);
                                 }
                                 HandshakePhase::Beta => {
                                     println!("re-requesting phase β...");
-                                    let _ = self.socket.send(&state.frame);
+                                    self.socket_tx.send(&state.frame);
                                 }
                             }
                         }
@@ -337,7 +267,7 @@ impl ClientCore {
                             .write_boxed();
 
                             println!("requesting phase β...");
-                            let _ = self.socket.send(&state.frame);
+                            self.socket_tx.send(&state.frame);
                         }
                     }
                 }
@@ -441,26 +371,26 @@ impl ClientCore {
         }
     }
 
-    /// Reads and processes as many frames as possible from receiver without blocking.
-    pub fn handle_frames(&mut self, receiver: &mut SocketReceiver) {
-        while let Ok(Some(frame_bytes)) = receiver.try_read_frame() {
+    /// Reads and processes as many frames as possible from socket_rx without blocking.
+    pub fn handle_frames(&mut self, socket_rx: &mut socket::ConnectedSocketRx) {
+        while let Ok(Some(frame_bytes)) = socket_rx.try_read_frame() {
             // Process this frame
             self.handle_frame(frame_bytes);
         }
     }
 
-    /// Reads and processes as many frames as possible from receiver, waiting up to
+    /// Reads and processes as many frames as possible from socket_rx, waiting up to
     /// `wait_timeout` for the first.
     pub fn handle_frames_wait(
         &mut self,
-        receiver: &mut SocketReceiver,
+        socket_rx: &mut socket::ConnectedSocketRx,
         wait_timeout: Option<time::Duration>,
     ) {
-        if let Ok(Some(frame_bytes)) = receiver.wait_for_frame(wait_timeout) {
+        if let Ok(Some(frame_bytes)) = socket_rx.wait_for_frame(wait_timeout) {
             // Process this frame
             self.handle_frame(frame_bytes);
             // Process any further frames without blocking
-            return self.handle_frames(receiver);
+            return self.handle_frames(socket_rx);
         }
     }
 
@@ -526,16 +456,8 @@ impl Client {
 
         let bind_address = (std::net::Ipv4Addr::UNSPECIFIED, 0);
 
-        let socket = net::UdpSocket::bind(bind_address)?;
-        socket.set_nonblocking(true)?;
-        socket.connect(server_addr)?;
-
-        let local_addr = socket.local_addr()?;
-        let peer_addr = socket.peer_addr()?;
-
-        let socket_rc = Rc::new(socket);
-
-        let receiver = SocketReceiver::new(Rc::clone(&socket_rc), frame_size_max)?;
+        let (mut socket_tx, socket_rx) =
+            socket::new_connected(bind_address, server_addr, frame_size_max)?;
 
         let local_nonce = rand::random::<u32>();
 
@@ -548,12 +470,12 @@ impl Client {
         .write_boxed();
 
         println!("requesting phase α...");
-        let _ = socket_rc.send(&handshake_frame);
+        socket_tx.send(&handshake_frame);
 
         Ok(Self {
             core: ClientCore {
                 time_ref: time::Instant::now(),
-                socket: Rc::clone(&socket_rc),
+                socket_tx: socket_tx,
                 state: State::Handshake(HandshakeState {
                     phase: HandshakePhase::Alpha,
                     timeout_time_ms: HANDSHAKE_TIMEOUT_MS,
@@ -570,9 +492,7 @@ impl Client {
                 },
                 events: VecDeque::new(),
             },
-            receiver,
-            local_addr,
-            peer_addr,
+            socket_rx,
         })
     }
 
@@ -585,7 +505,7 @@ impl Client {
         let ref mut core = self.core;
 
         if core.events.is_empty() {
-            core.handle_frames(&mut self.receiver);
+            core.handle_frames(&mut self.socket_rx);
 
             core.process_timeouts();
         }
@@ -601,7 +521,7 @@ impl Client {
         loop {
             let wait_timeout = core.next_timer_timeout();
 
-            core.handle_frames_wait(&mut self.receiver, wait_timeout);
+            core.handle_frames_wait(&mut self.socket_rx, wait_timeout);
 
             core.process_timeouts();
 
@@ -630,7 +550,7 @@ impl Client {
                     remaining_timeout
                 };
 
-                core.handle_frames_wait(&mut self.receiver, Some(wait_timeout));
+                core.handle_frames_wait(&mut self.socket_rx, Some(wait_timeout));
 
                 core.process_timeouts();
 
@@ -668,10 +588,10 @@ impl Client {
     }
 
     pub fn local_addr(&self) -> net::SocketAddr {
-        self.local_addr
+        self.socket_rx.local_addr()
     }
 
     pub fn server_addr(&self) -> net::SocketAddr {
-        self.peer_addr
+        self.socket_rx.peer_addr()
     }
 }

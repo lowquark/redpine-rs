@@ -9,18 +9,9 @@ use siphasher::sip;
 
 use super::endpoint;
 use super::frame;
+use super::socket;
 use super::timer_wheel;
 use super::SendMode;
-
-struct SocketReceiver {
-    // Reference to non-blocking, server socket
-    socket: Rc<net::UdpSocket>,
-    // Always-allocated receive buffer
-    recv_buffer: Box<[u8]>,
-    // Polling objects
-    poller: polling::Poller,
-    poller_events: polling::Events,
-}
 
 type PeerId = u32;
 
@@ -79,8 +70,8 @@ struct EndpointContext<'a> {
 struct ServerCore {
     // Timestamps are computed relative to this instant
     time_ref: time::Instant,
-    // Server socket
-    socket: Rc<net::UdpSocket>,
+    // Socket send handle
+    socket_tx: socket::SocketTx,
     // Key used to compute handshake MACs
     siphash_key: [u8; 16],
     // Table of connected peers
@@ -99,19 +90,15 @@ type ServerCoreWeak = Weak<RefCell<ServerCore>>;
 pub struct Server {
     // Interesting server data
     core: ServerCoreRc,
-    // Permits both blocking and non-blocking reads from a non-blocking socket
-    receiver: SocketReceiver,
+    // Socket receive handle
+    socket_rx: socket::SocketRx,
     // Always-allocated timer expiration buffer
     timer_data_buffer: Vec<PeerTimerData>,
-    // Cached from socket initialization
-    local_addr: net::SocketAddr,
 }
 
 pub struct PeerHandle {
     peer: PeerRc,
 }
-
-const SOCKET_POLLING_KEY: usize = 0;
 
 const TIMER_WHEEL_ARRAY_CONFIG: [timer_wheel::ArrayConfig; 3] = [
     timer_wheel::ArrayConfig {
@@ -129,64 +116,6 @@ const TIMER_WHEEL_ARRAY_CONFIG: [timer_wheel::ArrayConfig; 3] = [
 ];
 
 const HANDSHAKE_TIMEOUT_MS: u32 = 10000;
-
-impl SocketReceiver {
-    fn new(socket: Rc<net::UdpSocket>, frame_size_max: usize) -> std::io::Result<Self> {
-        let poller = polling::Poller::new()?;
-
-        unsafe {
-            poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
-        }
-
-        Ok(Self {
-            socket,
-            recv_buffer: vec![0; frame_size_max].into_boxed_slice(),
-            poller,
-            poller_events: polling::Events::new(),
-        })
-    }
-
-    /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
-    /// otherwise.
-    pub fn try_read_frame<'a>(
-        &'a mut self,
-    ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
-        match self.socket.recv_from(&mut self.recv_buffer) {
-            Ok((frame_len, sender_addr)) => {
-                let ref frame_bytes = self.recv_buffer[..frame_len];
-                Ok(Some((frame_bytes, sender_addr)))
-            }
-            Err(err) => match err.kind() {
-                // The only acceptable error is WouldBlock, indicating no packet
-                std::io::ErrorKind::WouldBlock => Ok(None),
-                _ => Err(err),
-            },
-        }
-    }
-
-    /// Blocks for a duration of up to `timeout` for an incoming frame and returns it. Returns
-    /// Ok(None) if no frame could be read in the alloted time, or if polling awoke spuriously.
-    pub fn wait_for_frame<'a>(
-        &'a mut self,
-        timeout: Option<time::Duration>,
-    ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
-        // Wait for a readable event (must be done prior to each wait() call)
-        // TODO: Does this work if the socket is already readable?
-        self.poller
-            .modify(&*self.socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
-
-        self.poller_events.clear();
-
-        let n = self.poller.wait(&mut self.poller_events, timeout)?;
-
-        if n > 0 {
-            // The socket is readable - read in confidence
-            self.try_read_frame()
-        } else {
-            Ok(None)
-        }
-    }
-}
 
 impl PeerTimers {
     fn new() -> Self {
@@ -282,7 +211,7 @@ impl<'a> EndpointContext<'a> {
 impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn send_frame(&mut self, frame_bytes: &[u8]) {
         // println!("{:?} <- {:02X?}", self.peer.addr, frame_bytes);
-        let _ = self.server.socket.send_to(frame_bytes, &self.peer.addr);
+        self.server.socket_tx.send(frame_bytes, &self.peer.addr);
     }
 
     fn set_timer(&mut self, name: endpoint::TimerName, time_ms: u64) {
@@ -428,7 +357,7 @@ impl ServerCore {
     }
 
     fn handle_handshake_alpha(
-        &self,
+        &mut self,
         payload_bytes: &[u8],
         sender_addr: &net::SocketAddr,
         now_ms: u64,
@@ -466,7 +395,7 @@ impl ServerCore {
                 let ack_frame_bytes = ack_frame.write(buffer);
 
                 println!("acking phase α...");
-                let _ = self.socket.send_to(&ack_frame_bytes, sender_addr);
+                self.socket_tx.send(&ack_frame_bytes, sender_addr);
             }
         }
     }
@@ -534,7 +463,7 @@ impl ServerCore {
                 let ack_frame_bytes = ack_frame.write(buffer);
 
                 println!("acking phase β...");
-                let _ = self.socket.send_to(&ack_frame_bytes, sender_addr);
+                self.socket_tx.send(&ack_frame_bytes, sender_addr);
             }
         }
     }
@@ -597,26 +526,26 @@ impl ServerCore {
         }
     }
 
-    /// Reads and processes as many frames as possible from receiver without blocking.
-    pub fn handle_frames(&mut self, receiver: &mut SocketReceiver) {
-        while let Ok(Some((frame_bytes, sender_addr))) = receiver.try_read_frame() {
+    /// Reads and processes as many frames as possible from socket_rx without blocking.
+    pub fn handle_frames(&mut self, socket_rx: &mut socket::SocketRx) {
+        while let Ok(Some((frame_bytes, sender_addr))) = socket_rx.try_read_frame() {
             // Process this frame
             self.handle_frame(frame_bytes, &sender_addr);
         }
     }
 
-    /// Reads and processes as many frames as possible from receiver, waiting up to `wait_timeout`
+    /// Reads and processes as many frames as possible from socket_rx, waiting up to `wait_timeout`
     /// for the first.
     pub fn handle_frames_wait(
         &mut self,
-        receiver: &mut SocketReceiver,
+        socket_rx: &mut socket::SocketRx,
         wait_timeout: Option<time::Duration>,
     ) {
-        if let Ok(Some((frame_bytes, sender_addr))) = receiver.wait_for_frame(wait_timeout) {
+        if let Ok(Some((frame_bytes, sender_addr))) = socket_rx.wait_for_frame(wait_timeout) {
             // Process this frame
             self.handle_frame(frame_bytes, &sender_addr);
             // Process any further frames without blocking
-            self.handle_frames(receiver);
+            self.handle_frames(socket_rx);
         }
     }
 }
@@ -632,14 +561,7 @@ impl Server {
         assert!(peer_count_max > 0);
         assert!(peer_count_max - 1 <= PeerId::max_value() as usize);
 
-        let socket = net::UdpSocket::bind(bind_addr)?;
-        socket.set_nonblocking(true)?;
-
-        let local_addr = socket.local_addr()?;
-
-        let socket_rc = Rc::new(socket);
-
-        let receiver = SocketReceiver::new(Rc::clone(&socket_rc), frame_size_max)?;
+        let (socket_tx, socket_rx) = socket::new(bind_addr, frame_size_max)?;
 
         // XXX TODO: CSPRNG!
         let siphash_key = (0..16)
@@ -656,7 +578,7 @@ impl Server {
         let core = Rc::new_cyclic(|self_weak| {
             RefCell::new(ServerCore {
                 time_ref: time::Instant::now(),
-                socket: socket_rc,
+                socket_tx,
                 siphash_key,
                 peer_table: PeerTable::new(peer_count_max),
                 timer_wheel: TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
@@ -667,9 +589,8 @@ impl Server {
 
         Ok(Self {
             core,
-            receiver,
+            socket_rx,
             timer_data_buffer: Vec::new(),
-            local_addr,
         })
     }
 
@@ -682,7 +603,7 @@ impl Server {
         let ref mut core = *self.core.borrow_mut();
 
         if core.events.is_empty() {
-            core.handle_frames(&mut self.receiver);
+            core.handle_frames(&mut self.socket_rx);
 
             core.handle_timeouts(&mut self.timer_data_buffer);
         }
@@ -698,7 +619,7 @@ impl Server {
         loop {
             let wait_timeout = core.next_timer_timeout();
 
-            core.handle_frames_wait(&mut self.receiver, wait_timeout);
+            core.handle_frames_wait(&mut self.socket_rx, wait_timeout);
 
             core.handle_timeouts(&mut self.timer_data_buffer);
 
@@ -727,7 +648,7 @@ impl Server {
                     remaining_timeout
                 };
 
-                core.handle_frames_wait(&mut self.receiver, Some(wait_timeout));
+                core.handle_frames_wait(&mut self.socket_rx, Some(wait_timeout));
 
                 core.handle_timeouts(&mut self.timer_data_buffer);
 
@@ -753,7 +674,7 @@ impl Server {
     }
 
     pub fn local_addr(&self) -> net::SocketAddr {
-        self.local_addr
+        self.socket_rx.local_addr()
     }
 
     pub fn peer_count(&self) -> usize {
