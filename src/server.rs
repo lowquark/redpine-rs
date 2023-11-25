@@ -433,7 +433,7 @@ impl ServerCore {
         sender_addr: &net::SocketAddr,
         now_ms: u64,
     ) {
-        use frame::serial::SimplePayloadReader;
+        use frame::serial::SimplePayloadRead;
 
         if let Some(frame) = frame::HandshakeAlphaFrame::read(payload_bytes) {
             if frame.protocol_id == frame::serial::PROTOCOL_ID {
@@ -460,10 +460,10 @@ impl ServerCore {
                 };
 
                 use frame::serial::SimpleFrame;
-                use frame::serial::SimpleFrameWriter;
+                use frame::serial::SimpleFrameWrite;
 
                 let ref mut buffer = [0u8; frame::HandshakeAlphaAckFrame::FRAME_SIZE];
-                let ack_frame_bytes = ack_frame.write_into(buffer);
+                let ack_frame_bytes = ack_frame.write(buffer);
 
                 println!("acking phase α...");
                 let _ = self.socket.send_to(&ack_frame_bytes, sender_addr);
@@ -477,7 +477,7 @@ impl ServerCore {
         sender_addr: &net::SocketAddr,
         now_ms: u64,
     ) {
-        use frame::serial::SimplePayloadReader;
+        use frame::serial::SimplePayloadRead;
 
         if let Some(frame) = frame::HandshakeBetaFrame::read(payload_bytes) {
             let timestamp_now = now_ms as u32;
@@ -528,10 +528,10 @@ impl ServerCore {
                 };
 
                 use frame::serial::SimpleFrame;
-                use frame::serial::SimpleFrameWriter;
+                use frame::serial::SimpleFrameWrite;
 
                 let ref mut buffer = [0u8; frame::HandshakeBetaAckFrame::FRAME_SIZE];
-                let ack_frame_bytes = ack_frame.write_into(buffer);
+                let ack_frame_bytes = ack_frame.write(buffer);
 
                 println!("acking phase β...");
                 let _ = self.socket.send_to(&ack_frame_bytes, sender_addr);

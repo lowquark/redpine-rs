@@ -279,13 +279,15 @@ impl Endpoint {
 
     fn handle_stream_frame<C>(
         &mut self,
-        mut frame_reader: frame::serial::EzReader,
         frame_type: frame::FrameType,
+        payload_bytes: &[u8],
         now_ms: u64,
         ctx: &mut C,
     ) where
         C: HostContext,
     {
+        let mut frame_reader = frame::serial::PayloadReader::new(payload_bytes);
+
         let (read_ack, read_data) = match frame_type {
             frame::FrameType::StreamSegment => (false, true),
             frame::FrameType::StreamAck => (true, false),
@@ -343,7 +345,7 @@ impl Endpoint {
                     segment_nonce,
                     segment_bytes,
                     |segment_bytes: &[u8]| {
-                        let mut frame_reader = frame::serial::EzReader::new(segment_bytes);
+                        let mut frame_reader = frame::serial::PayloadReader::new(segment_bytes);
 
                         while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
                             let unrel = datagram.unrel;
@@ -379,16 +381,20 @@ impl Endpoint {
         self.flush_stream(ack_unrel, ack_rel, now_ms, ctx);
     }
 
-    fn validate_close_frame(&self, mut frame_reader: frame::serial::EzReader) -> bool {
-        if let Some(frame) = frame_reader.read::<frame::CloseFrame>() {
+    fn validate_close_frame(&self, payload_bytes: &[u8]) -> bool {
+        use frame::serial::SimplePayloadRead;
+
+        if let Some(frame) = frame::CloseFrame::read(payload_bytes) {
             frame.remote_nonce == self.local_nonce
         } else {
             false
         }
     }
 
-    fn validate_close_ack_frame(&self, mut frame_reader: frame::serial::EzReader) -> bool {
-        if let Some(frame) = frame_reader.read::<frame::CloseAckFrame>() {
+    fn validate_close_ack_frame(&self, payload_bytes: &[u8]) -> bool {
+        use frame::serial::SimplePayloadRead;
+
+        if let Some(frame) = frame::CloseAckFrame::read(payload_bytes) {
             frame.remote_nonce == self.local_nonce
         } else {
             false
@@ -404,17 +410,15 @@ impl Endpoint {
     ) where
         C: HostContext,
     {
-        let frame_reader = frame::serial::EzReader::new(payload_bytes);
-
         match self.state_id {
             StateId::Active => match frame_type {
                 frame::FrameType::StreamSegment
                 | frame::FrameType::StreamAck
                 | frame::FrameType::StreamSegmentAck => {
-                    self.handle_stream_frame(frame_reader, frame_type, now_ms, ctx)
+                    self.handle_stream_frame(frame_type, payload_bytes, now_ms, ctx)
                 }
                 frame::FrameType::Close => {
-                    if self.validate_close_frame(frame_reader) {
+                    if self.validate_close_frame(payload_bytes) {
                         // Acknowledge
                         self.send_close_ack_frame(ctx);
 
@@ -432,7 +436,7 @@ impl Endpoint {
             },
             StateId::Closing => match frame_type {
                 frame::FrameType::Close => {
-                    if self.validate_close_frame(frame_reader) {
+                    if self.validate_close_frame(payload_bytes) {
                         // Acknowledge
                         self.send_close_ack_frame(ctx);
 
@@ -445,7 +449,7 @@ impl Endpoint {
                     }
                 }
                 frame::FrameType::CloseAck => {
-                    if self.validate_close_ack_frame(frame_reader) {
+                    if self.validate_close_ack_frame(payload_bytes) {
                         // Unset to prevent spurious timer event
                         ctx.unset_timer(TimerName::Rto);
 
@@ -458,7 +462,7 @@ impl Endpoint {
             },
             StateId::Closed => match frame_type {
                 frame::FrameType::Close => {
-                    if self.validate_close_frame(frame_reader) {
+                    if self.validate_close_frame(payload_bytes) {
                         // Acknowledge further requests until destruction
                         self.send_close_ack_frame(ctx);
                     }
@@ -569,7 +573,7 @@ impl Endpoint {
                 };
 
                 let mut frame_writer =
-                    frame::serial::FrameWriter::new(&mut self.tx_buffer, frame_type).unwrap();
+                    frame::serial::FrameWriter::new(&mut self.tx_buffer, frame_type);
 
                 if send_ack {
                     let segment_id = self.segment_rx_buffer.next_expected_id();
@@ -652,26 +656,26 @@ impl Endpoint {
     where
         C: HostContext,
     {
-        use frame::serial::SimpleFrameWriter;
+        use frame::serial::SimpleFrameWrite;
 
         let frame = frame::CloseFrame {
             remote_nonce: self.remote_nonce,
         };
 
-        ctx.send_frame(frame.write_into(&mut self.tx_buffer));
+        ctx.send_frame(frame.write(&mut self.tx_buffer));
     }
 
     fn send_close_ack_frame<C>(&mut self, ctx: &mut C)
     where
         C: HostContext,
     {
-        use frame::serial::SimpleFrameWriter;
+        use frame::serial::SimpleFrameWrite;
 
         let frame = frame::CloseAckFrame {
             remote_nonce: self.remote_nonce,
         };
 
-        ctx.send_frame(frame.write_into(&mut self.tx_buffer));
+        ctx.send_frame(frame.write(&mut self.tx_buffer));
     }
 
     pub fn disconnect<C>(&mut self, now_ms: u64, ctx: &mut C)

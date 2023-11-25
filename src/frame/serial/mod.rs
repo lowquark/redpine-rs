@@ -475,10 +475,8 @@ pub struct FrameWriter<'a> {
 }
 
 impl<'a> FrameWriter<'a> {
-    pub fn new(buffer: &'a mut [u8], frame_type: FrameType) -> Option<Self> {
-        if buffer.len() < FRAME_HEADER_SIZE + FRAME_CRC_SIZE {
-            return None;
-        }
+    pub fn new(buffer: &'a mut [u8], frame_type: FrameType) -> Self {
+        debug_assert!(buffer.len() >= FRAME_OVERHEAD_SIZE);
 
         let type_bits = match frame_type {
             FrameType::HandshakeAlpha => FRAME_TYPE_HANDSHAKE_ALPHA,
@@ -501,10 +499,10 @@ impl<'a> FrameWriter<'a> {
 
         debug_assert_eq!(wr.bytes_written(), FRAME_HEADER_SIZE);
 
-        Some(Self {
+        Self {
             buffer,
             write_idx: FRAME_HEADER_SIZE,
-        })
+        }
     }
 
     pub fn write<'b, A>(&mut self, obj: &A) -> bool
@@ -539,12 +537,12 @@ impl<'a> FrameWriter<'a> {
     }
 }
 
-pub struct EzReader<'a> {
+pub struct PayloadReader<'a> {
     buffer: &'a [u8],
     read_idx: usize,
 }
 
-impl<'a> EzReader<'a> {
+impl<'a> PayloadReader<'a> {
     pub fn new(buffer: &'a [u8]) -> Self {
         Self {
             buffer,
@@ -662,43 +660,43 @@ impl SimpleFrame for CloseAckFrame {
     const PAYLOAD_SIZE: usize = HANDSHAKE_BETA_ACK_SIZE;
 }
 
-pub trait SimpleFrameWriter {
-    fn write(&self) -> Box<[u8]>;
-    fn write_into<'a>(&self, dst: &'a mut [u8]) -> &'a [u8];
+pub trait SimpleFrameWrite {
+    fn write<'a>(&self, dst: &'a mut [u8]) -> &'a [u8];
+    fn write_boxed(&self) -> Box<[u8]>;
 }
 
-impl<T> SimpleFrameWriter for T
+impl<T> SimpleFrameWrite for T
 where
     T: SimpleFrame + BlockSerial,
 {
-    fn write(&self) -> Box<[u8]> {
-        let mut buffer = vec![0; Self::FRAME_SIZE].into_boxed_slice();
-        let mut wr = FrameWriter::new(&mut buffer, Self::FRAME_TYPE).unwrap();
-        wr.write(self);
-        wr.finalize();
-        buffer
-    }
-
-    fn write_into<'a>(&self, dst: &'a mut [u8]) -> &'a [u8] {
+    fn write<'a>(&self, dst: &'a mut [u8]) -> &'a [u8] {
         debug_assert!(dst.len() >= Self::FRAME_SIZE);
-        let mut wr = FrameWriter::new(dst, Self::FRAME_TYPE).unwrap();
+        let mut wr = FrameWriter::new(dst, Self::FRAME_TYPE);
         wr.write(self);
         return wr.finalize();
     }
+
+    fn write_boxed(&self) -> Box<[u8]> {
+        let mut buffer = vec![0; Self::FRAME_SIZE].into_boxed_slice();
+        let mut wr = FrameWriter::new(&mut buffer, Self::FRAME_TYPE);
+        wr.write(self);
+        wr.finalize();
+        return buffer;
+    }
 }
 
-pub trait SimplePayloadReader {
+pub trait SimplePayloadRead {
     fn read(src: &[u8]) -> Option<Self>
     where
         Self: Sized;
 }
 
-impl<T> SimplePayloadReader for T
+impl<T> SimplePayloadRead for T
 where
     T: SimpleFrame + BlockSerial,
 {
     fn read(src: &[u8]) -> Option<Self> {
-        EzReader::new(src).read::<Self>()
+        PayloadReader::new(src).read::<Self>()
     }
 }
 
@@ -727,7 +725,7 @@ mod tests {
             let mut datagrams = Vec::new();
 
             let mut buf = [0; 32 * 1024];
-            let mut writer = serial::FrameWriter::new(&mut buf, FrameType::StreamSegment).unwrap();
+            let mut writer = serial::FrameWriter::new(&mut buf, FrameType::StreamSegment);
 
             for i in 0..datagram_count {
                 let size = if i == 0 {
@@ -761,7 +759,7 @@ mod tests {
             assert!(verify_crc(frame));
             assert_eq!(read_type(frame), Some(FrameType::StreamSegment));
 
-            let mut reader = serial::EzReader::new(payload(frame));
+            let mut reader = serial::PayloadReader::new(payload(frame));
 
             for i in 0..datagram_count {
                 let dg = reader.read::<Datagram>().unwrap();

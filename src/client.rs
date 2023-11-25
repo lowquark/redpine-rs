@@ -305,7 +305,7 @@ impl ClientCore {
     }
 
     fn handle_handshake_alpha_ack(&mut self, payload_bytes: &[u8], now_ms: u64) {
-        use frame::serial::SimplePayloadReader;
+        use frame::serial::SimplePayloadRead;
 
         match self.state {
             State::Handshake(ref mut state) => match state.phase {
@@ -326,7 +326,7 @@ impl ClientCore {
                             self.timers.rto_timer.timeout_ms =
                                 Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
 
-                            use frame::serial::SimpleFrameWriter;
+                            use frame::serial::SimpleFrameWrite;
                             state.frame = frame::HandshakeBetaFrame {
                                 client_params,
                                 client_nonce: frame.client_nonce,
@@ -334,7 +334,7 @@ impl ClientCore {
                                 server_timestamp: frame.server_timestamp,
                                 server_mac: frame.server_mac,
                             }
-                            .write();
+                            .write_boxed();
 
                             println!("requesting phase β...");
                             let _ = self.socket.send(&state.frame);
@@ -348,7 +348,7 @@ impl ClientCore {
     }
 
     fn handle_handshake_beta_ack(&mut self, payload_bytes: &[u8], now_ms: u64) {
-        use frame::serial::SimplePayloadReader;
+        use frame::serial::SimplePayloadRead;
 
         match self.state {
             State::Handshake(ref mut state) => match state.phase {
@@ -539,13 +539,13 @@ impl Client {
 
         let local_nonce = rand::random::<u32>();
 
-        use frame::serial::SimpleFrameWriter;
+        use frame::serial::SimpleFrameWrite;
 
         let handshake_frame = frame::HandshakeAlphaFrame {
             protocol_id: frame::serial::PROTOCOL_ID,
             client_nonce: local_nonce,
         }
-        .write();
+        .write_boxed();
 
         println!("requesting phase α...");
         let _ = socket_rc.send(&handshake_frame);
