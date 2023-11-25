@@ -1,3 +1,5 @@
+mod crc;
+
 use super::*;
 
 pub const PROTOCOL_ID: u16 = 0;
