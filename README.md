@@ -4,10 +4,14 @@
 
   * Implement AIMD congestion control
 
+  * Implement RTT estimation
+
   * Iron out RTO resynchronization
 
   * Implement server/client configuration
 
-  * Use CSPRNG when initializing SipHash key
+  * Implement handshake errors
 
-  * Simplify frame serialization further (Use EzReader only)
+  * Implement multi-client test
+
+  * Use CSPRNG when initializing SipHash key
