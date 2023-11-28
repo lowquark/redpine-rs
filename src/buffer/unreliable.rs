@@ -1,9 +1,9 @@
-use super::FragmentGen;
 use super::FragmentRc;
 use super::FragmentRef;
 use super::Window;
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 // No sendable fragments sent:
 // v---------------
@@ -25,23 +25,19 @@ use std::collections::VecDeque;
 // v---------------
 //                 ^
 
+struct TxEntry {
+    fragment: FragmentRc,
+    expire_time_ms: u64,
+}
+
 pub struct TxBuffer {
-    fragments: VecDeque<FragmentRc>,
+    fragments: VecDeque<TxEntry>,
     next_fragment_id: u32,
     fragment_size: usize,
     send_window: Window,
 }
 
 impl TxBuffer {
-    /// Returns the ID of the next fragment to be sent, whether or not it exists yet
-    fn next_send_id(&self) -> u32 {
-        if let Some(fragment) = self.fragments.front() {
-            fragment.id
-        } else {
-            self.next_fragment_id
-        }
-    }
-
     pub fn new(base_id: u32, window_size: u32, fragment_size: usize) -> Self {
         assert!(fragment_size > 0);
 
@@ -53,38 +49,79 @@ impl TxBuffer {
         }
     }
 
-    pub fn push(&mut self, packet: Box<[u8]>) {
-        let mut fragment_iter = FragmentGen::new(packet, self.fragment_size, self.next_fragment_id);
+    pub fn push(&mut self, packet: Box<[u8]>, expire_time_ms: u64) {
+        let packet_len = packet.len();
 
-        self.fragments.extend(&mut fragment_iter);
+        let mut bytes_remaining = packet.len();
+        let mut index = 0;
+        let mut first = true;
 
-        self.next_fragment_id = fragment_iter.next_fragment_id();
+        let packet_rc = Rc::new(packet);
+
+        while bytes_remaining > self.fragment_size {
+            let data_range = index..index + self.fragment_size;
+
+            self.fragments.push_back(TxEntry {
+                fragment: FragmentRc {
+                    first,
+                    last: false,
+                    data: Rc::clone(&packet_rc),
+                    data_range,
+                },
+                expire_time_ms,
+            });
+
+            first = false;
+            index += self.fragment_size;
+
+            bytes_remaining -= self.fragment_size;
+        }
+
+        let data_range = index..packet_len;
+
+        self.fragments.push_back(TxEntry {
+            fragment: FragmentRc {
+                first,
+                last: true,
+                data: packet_rc,
+                data_range,
+            },
+            expire_time_ms,
+        });
     }
 
-    pub fn peek_sendable(&self) -> Option<&FragmentRc> {
-        // Ensure the send window is in sync with the fragment queue
-        debug_assert!(
-            self.next_send_id().wrapping_sub(self.send_window.base_id) <= self.send_window.size
-        );
+    /// Pops all fragments from the front of the queue which have expired
+    pub fn pop_expired(&mut self, now_ms: u64) {
+        while let Some(entry) = self.fragments.front() {
+            if entry.expire_time_ms <= now_ms {
+                self.fragments.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
 
-        if let Some(fragment) = self.fragments.front() {
-            if self.send_window.contains(fragment.id) {
-                return self.fragments.front();
+    pub fn peek_sendable(&self) -> Option<(u32, &FragmentRc)> {
+        if let Some(entry) = self.fragments.front() {
+            if self.send_window.contains(self.next_fragment_id) {
+                let fragment_id = self.next_fragment_id;
+
+                return Some((fragment_id, &entry.fragment));
             }
         }
 
         return None;
     }
 
-    pub fn pop_sendable(&mut self) -> Option<FragmentRc> {
-        // Ensure the send window is in sync with the fragment queue
-        debug_assert!(
-            self.next_send_id().wrapping_sub(self.send_window.base_id) <= self.send_window.size
-        );
+    pub fn pop_sendable(&mut self) -> Option<(u32, FragmentRc)> {
+        if !self.fragments.is_empty() {
+            if self.send_window.contains(self.next_fragment_id) {
+                let entry = self.fragments.pop_front().unwrap();
 
-        if let Some(fragment) = self.fragments.front() {
-            if self.send_window.contains(fragment.id) {
-                return self.fragments.pop_front();
+                let fragment_id = self.next_fragment_id;
+                self.next_fragment_id = self.next_fragment_id.wrapping_add(1);
+
+                return Some((fragment_id, entry.fragment));
             }
         }
 
@@ -92,13 +129,8 @@ impl TxBuffer {
     }
 
     pub fn acknowledge(&mut self, new_base_id: u32) -> bool {
-        // Ensure the send window is in sync with the fragment queue
-        debug_assert!(
-            self.next_send_id().wrapping_sub(self.send_window.base_id) <= self.send_window.size
-        );
-
         // For an ack to be valid, the new base ID may not exceed the next ID to be sent
-        let ack_delta_max = self.next_send_id().wrapping_sub(self.send_window.base_id);
+        let ack_delta_max = self.next_fragment_id.wrapping_sub(self.send_window.base_id);
         let ack_delta = new_base_id.wrapping_sub(self.send_window.base_id);
 
         if ack_delta <= ack_delta_max {
@@ -147,8 +179,8 @@ impl RxBuffer {
         return true;
     }
 
-    pub fn receive(&mut self, fragment: &FragmentRef) -> Option<Box<[u8]>> {
-        if self.receive_window.contains(fragment.id)
+    pub fn receive(&mut self, fragment_id: u32, fragment: &FragmentRef) -> Option<Box<[u8]>> {
+        if self.receive_window.contains(fragment_id)
             && Self::fragment_is_valid(fragment, self.fragment_size)
         {
             if fragment.first {
@@ -158,11 +190,11 @@ impl RxBuffer {
                     // This is a one-fragment packet, invalidate previous assembly
                     self.current_build = None;
 
-                    // Expect subsequent packet
-                    self.receive_window.base_id = fragment.id.wrapping_add(1);
+                    // Expect subsequent fragment
+                    self.receive_window.base_id = fragment_id.wrapping_add(1);
 
-                    // Return clone of input slice (fragments are assumed to be referenced directly
-                    // from their containing frame)
+                    // Return clone of input slice (fragment data is referenced directly from its
+                    // containing frame)
                     return Some(fragment.data.into());
                 } else {
                     // This is a multi-fragment packet, start new assembly
@@ -171,18 +203,18 @@ impl RxBuffer {
 
                     self.current_build = Some(PacketBuild { buffer });
 
-                    // Expect subsequent packet
-                    self.receive_window.base_id = fragment.id.wrapping_add(1);
+                    // Expect subsequent fragment
+                    self.receive_window.base_id = fragment_id.wrapping_add(1);
 
                     return None;
                 }
-            } else if fragment.id == self.receive_window.base_id {
+            } else if fragment_id == self.receive_window.base_id {
                 // Extend existing packet
                 if let Some(ref mut current_build) = self.current_build {
                     current_build.buffer.extend_from_slice(fragment.data);
 
-                    // Expect subsequent packet
-                    self.receive_window.base_id = fragment.id.wrapping_add(1);
+                    // Expect subsequent fragment
+                    self.receive_window.base_id = fragment_id.wrapping_add(1);
 
                     // Return if finished
                     if fragment.last {
@@ -212,13 +244,19 @@ mod tests {
     use super::*;
 
     // Tests peek in all cases that we test pop
-    fn peek_and_pop_sendable(send_buf: &mut TxBuffer) -> Option<FragmentRc> {
-        let fragment_peek = send_buf.peek_sendable().cloned();
-        let fragment_pop = send_buf.pop_sendable();
+    fn peek_and_pop_sendable(send_buf: &mut TxBuffer) -> Option<(u32, FragmentRc)> {
+        let peek_result = match send_buf.peek_sendable() {
+            Some(result) => {
+                Some((result.0, result.1.clone()))
+            },
+            None => None,
+        };
 
-        assert_eq!(fragment_peek, fragment_pop);
+        let pop_result = send_buf.pop_sendable();
 
-        return fragment_pop;
+        assert_eq!(peek_result, pop_result);
+
+        return pop_result;
     }
 
     fn push_basic(send_buf: &mut TxBuffer, id: u32) {
@@ -230,10 +268,10 @@ mod tests {
         ]
         .into();
 
-        send_buf.push(packet_data);
+        send_buf.push(packet_data, u64::max_value());
     }
 
-    fn expect_pop_basic(send_buf: &mut TxBuffer, id: u32) -> FragmentRc {
+    fn expect_pop_basic(send_buf: &mut TxBuffer, id: u32) {
         let packet_data = Rc::new(
             vec![
                 (id >> 24) as u8,
@@ -244,20 +282,19 @@ mod tests {
             .into_boxed_slice(),
         );
 
-        let fragment = peek_and_pop_sendable(send_buf);
+        let (fragment_id, fragment) = peek_and_pop_sendable(send_buf).unwrap();
+
+        assert_eq!(fragment_id, id);
 
         assert_eq!(
             fragment,
-            Some(FragmentRc {
-                id,
+            FragmentRc {
                 first: true,
                 last: true,
                 data: packet_data,
                 data_range: 0..4,
-            })
+            }
         );
-
-        return fragment.unwrap();
     }
 
     fn expect_pop_fail(send_buf: &mut TxBuffer) {
@@ -284,25 +321,27 @@ mod tests {
         let mut send_buf = TxBuffer::new(initial_base_id, window_size, fragment_size);
 
         // Enqueue a single packet
-        send_buf.push(packet_data.clone());
+        send_buf.push(packet_data.clone(), u64::max_value());
 
         let packet_data_rc = Rc::new(packet_data.clone());
 
         // Test the ranges and IDs of resulting fragments
         for (idx, range) in ranges.iter().enumerate() {
-            let fragment = peek_and_pop_sendable(&mut send_buf);
+            let (fragment_id, fragment) = peek_and_pop_sendable(&mut send_buf).unwrap();
+
+            assert_eq!(fragment_id, initial_base_id.wrapping_add(idx as u32));
 
             assert_eq!(
                 fragment,
-                Some(FragmentRc {
-                    id: initial_base_id.wrapping_add(idx as u32),
+                FragmentRc {
                     first: idx == 0,
                     last: idx == (ranges.len() - 1),
                     data: packet_data_rc.clone(),
                     data_range: range.clone(),
-                })
+                }
             );
         }
+
         expect_pop_fail(&mut send_buf);
     }
 

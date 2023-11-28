@@ -1,7 +1,5 @@
 # TODO
 
-  * Discard unreliable packets according to TTL & timestamp
-
   * Implement AIMD congestion control
 
   * Implement RTT estimation

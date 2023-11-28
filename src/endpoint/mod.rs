@@ -117,13 +117,16 @@ impl FragmentTxBuffers {
         }
     }
 
-    pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+    pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode, now_ms: u64) {
         match mode {
             SendMode::Reliable => {
                 self.rel.push(packet_bytes);
             }
-            SendMode::Unreliable(_timeout_ms) => {
-                self.unrel.push(packet_bytes);
+            SendMode::Unreliable(timeout_ms) => {
+                // The timeout field is the minimum amount of time for which a packet should be
+                // sent, when possible
+                const CLOCK_GRANULARITY_MS: u64 = 1;
+                self.unrel.push(packet_bytes, now_ms + CLOCK_GRANULARITY_MS + timeout_ms as u64);
             }
         }
     }
@@ -138,34 +141,38 @@ impl FragmentTxBuffers {
         }
     }
 
-    pub fn data_ready(&self) -> bool {
+    pub fn data_ready(&mut self, now_ms: u64) -> bool {
+        self.unrel.pop_expired(now_ms);
+
         self.unrel.peek_sendable().is_some() || self.rel.peek_sendable().is_some()
     }
 
-    pub fn flush(&mut self, writer: &mut frame::serial::FrameWriter) -> usize {
+    pub fn flush(&mut self, writer: &mut frame::serial::FrameWriter, now_ms: u64) -> usize {
         let mut data_size_total = 0;
 
         loop {
-            let unrel_fragment = self.unrel.peek_sendable();
-            let rel_fragment = self.rel.peek_sendable();
+            self.unrel.pop_expired(now_ms);
 
-            let (fragment, mode) = if unrel_fragment.is_some() && rel_fragment.is_some() {
+            let unrel_next = self.unrel.peek_sendable();
+            let rel_next = self.rel.peek_sendable();
+
+            let (mode, next) = if unrel_next.is_some() && rel_next.is_some() {
                 match self.prio_state.next_mode() {
-                    SendModeType::Unreliable => (unrel_fragment, SendModeType::Unreliable),
-                    SendModeType::Reliable => (rel_fragment, SendModeType::Reliable),
+                    SendModeType::Unreliable => (SendModeType::Unreliable, unrel_next),
+                    SendModeType::Reliable => (SendModeType::Reliable, rel_next),
                 }
-            } else if unrel_fragment.is_some() {
-                (unrel_fragment, SendModeType::Unreliable)
-            } else if rel_fragment.is_some() {
-                (rel_fragment, SendModeType::Reliable)
+            } else if unrel_next.is_some() {
+                (SendModeType::Unreliable, unrel_next)
+            } else if rel_next.is_some() {
+                (SendModeType::Reliable, rel_next)
             } else {
                 break;
             };
 
-            let fragment = fragment.unwrap();
+            let (id, fragment) = next.unwrap();
 
             let datagram = frame::Datagram {
-                id: fragment.id,
+                id,
                 unrel: mode == SendModeType::Unreliable,
                 first: fragment.first,
                 last: fragment.last,
@@ -272,7 +279,7 @@ impl Endpoint {
         C: HostContext,
     {
         if self.state_id == StateId::Active {
-            self.fragment_tx.enqueue(packet_bytes, mode);
+            self.fragment_tx.enqueue(packet_bytes, mode, now_ms);
             self.flush_stream(false, false, now_ms, ctx);
         }
     }
@@ -350,21 +357,22 @@ impl Endpoint {
                         while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
                             let unrel = datagram.unrel;
 
+                            let id = datagram.id;
+
                             let ref fragment = buffer::FragmentRef {
-                                id: datagram.id,
                                 first: datagram.first,
                                 last: datagram.last,
                                 data: datagram.data,
                             };
 
                             if unrel {
-                                if let Some(packet) = self.unreliable_rx.receive(fragment) {
+                                if let Some(packet) = self.unreliable_rx.receive(id, fragment) {
                                     ctx.on_receive(packet);
                                 }
 
                                 ack_unrel = true;
                             } else {
-                                if let Some(packet) = self.reliable_rx.receive(fragment) {
+                                if let Some(packet) = self.reliable_rx.receive(id, fragment) {
                                     ctx.on_receive(packet);
                                 }
 
@@ -549,7 +557,7 @@ impl Endpoint {
 
             let frame_window_limited = !self.segment_tx.can_send();
             let congestion_window_limited = self.segment_tx.bytes_in_transit() >= self.cwnd;
-            let data_ready = self.fragment_tx.data_ready();
+            let data_ready = self.fragment_tx.data_ready(now_ms);
 
             let send_data = !frame_window_limited && !congestion_window_limited && data_ready;
 
@@ -621,13 +629,13 @@ impl Endpoint {
 
                     frame_writer.write(&header);
 
-                    let size_written = self.fragment_tx.flush(&mut frame_writer);
+                    let size_written = self.fragment_tx.flush(&mut frame_writer, now_ms);
 
                     debug_assert!(size_written > 0);
 
                     self.segment_tx.mark_sent(size_written);
 
-                    // Acks are expected, set the resend timeout if not already
+                    // Acks are expected, set the resend timeout if not set already
                     if !self.rto_timer_set {
                         ctx.set_timer(TimerName::Rto, now_ms + RESEND_TIMEOUT_MS);
                         self.rto_timer_set = true;
