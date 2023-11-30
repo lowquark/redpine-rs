@@ -125,8 +125,8 @@ impl FragmentTxBuffers {
             SendMode::Unreliable(timeout_ms) => {
                 // The timeout field is the minimum amount of time for which a packet should be
                 // sent, when possible
-                const CLOCK_GRANULARITY_MS: u64 = 1;
-                self.unrel.push(packet_bytes, now_ms + CLOCK_GRANULARITY_MS + timeout_ms as u64);
+                self.unrel
+                    .push(packet_bytes, now_ms + timeout_ms as u64 + 1);
             }
         }
     }
@@ -203,11 +203,33 @@ impl FragmentTxBuffers {
     }
 }
 
-// TODO: RTO calculation
-const RESEND_TIMEOUT_MS: u64 = 3000;
+const INITIAL_RTO_MS: u64 = 1000;
+const RTO_MAX_MS: u64 = 60000;
+const RTO_MIN_MS: u64 = 1000;
 
 const CLOSE_RESEND_TIMEOUT_MS: u64 = 2000;
 const DISCONNECT_TIMEOUT_MS: u64 = 10000;
+
+const ALPHA: f32 = 0.125;
+const BETA: f32 = 0.25;
+const G_MS: f32 = 4.0;
+const K: f32 = 4.0;
+
+struct RttState {
+    srtt_ms: f32,
+    rttvar_ms: f32,
+}
+
+struct RtoTimerState {
+    rto_ms: u64,
+    rto_sum_ms: u64,
+}
+
+struct RttTimerState {
+    segment_id: u32,
+    send_time_ms: u64,
+    expire_time_ms: u64,
+}
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum StateId {
@@ -232,7 +254,12 @@ pub struct Endpoint {
 
     tx_buffer: [u8; 1478],
 
-    rto_timer_set: bool,
+    rto_ms: u64,
+    timeout_time_ms: u64,
+    rto_timer_state: Option<RtoTimerState>,
+
+    rtt_state: Option<RttState>,
+    rtt_timer_state: Option<RttTimerState>,
 
     // Receiver state
     segment_rx_buffer: segment_rx::SegmentRx,
@@ -245,6 +272,7 @@ impl Endpoint {
         let fragment_size = 1478;
         let fragment_window_size = 1024;
         let segment_window_size = 128;
+        let timeout_time_ms = 10_000;
 
         let local_nonce = 0;
         let remote_nonce = 0;
@@ -257,7 +285,11 @@ impl Endpoint {
             fragment_tx: FragmentTxBuffers::new(0, fragment_window_size, fragment_size),
             cwnd: 15000,
             tx_buffer: [0; 1478],
-            rto_timer_set: false,
+            rto_ms: INITIAL_RTO_MS,
+            timeout_time_ms,
+            rto_timer_state: None,
+            rtt_state: None,
+            rtt_timer_state: None,
             segment_rx_buffer: segment_rx::SegmentRx::new(0, segment_window_size, fragment_size),
             unreliable_rx: buffer::UnreliableRxBuffer::new(0, fragment_window_size, fragment_size),
             reliable_rx: buffer::ReliableRxBuffer::new(0, fragment_size),
@@ -281,6 +313,62 @@ impl Endpoint {
         if self.state_id == StateId::Active {
             self.fragment_tx.enqueue(packet_bytes, mode, now_ms);
             self.flush_stream(false, false, now_ms, ctx);
+        }
+    }
+
+    fn update_rtt(&mut self, segment_id: u32, now_ms: u64) {
+        if let Some(ref state) = self.rtt_timer_state {
+            if segment_id == state.segment_id.wrapping_add(1) {
+                // Source: RFC 6298, Computing TCP's Retransmission Timer
+
+                // This is the ack the RTT timer is looking for
+                let rtt_ms = (now_ms - state.send_time_ms) as f32;
+
+                if let Some(ref mut rtt_state) = self.rtt_state {
+                    rtt_state.rttvar_ms = (1.0 - BETA) * rtt_state.rttvar_ms
+                        + BETA * (rtt_state.srtt_ms - rtt_ms).abs();
+
+                    rtt_state.srtt_ms = (1.0 - ALPHA) * rtt_state.srtt_ms + ALPHA * rtt_ms;
+                } else {
+                    self.rtt_state = Some(RttState {
+                        srtt_ms: rtt_ms,
+                        rttvar_ms: rtt_ms / 2.0,
+                    });
+                }
+
+                let ref mut rtt_state = self.rtt_state.as_mut().unwrap();
+
+                println!("RTTVAR: {}", rtt_state.rttvar_ms);
+                println!("SRTT: {}", rtt_state.srtt_ms);
+
+                self.rto_ms = (rtt_state.srtt_ms + G_MS.max(K * rtt_state.rttvar_ms)).ceil() as u64;
+
+                self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
+
+                self.rtt_timer_state = None;
+            } else if state.expire_time_ms <= now_ms {
+                // RTT timer timed out, better luck next time
+                self.rtt_timer_state = None;
+            }
+        }
+    }
+
+    fn update_rto_timer<C>(&mut self, segment_id: u32, now_ms: u64, ctx: &mut C)
+    where
+        C: HostContext,
+    {
+        if let Some(ref mut state) = self.rto_timer_state {
+            if segment_id == self.segment_tx.next_id() {
+                // All caught up
+                ctx.unset_timer(TimerName::Rto);
+                self.rto_timer_state = None;
+            } else {
+                // More acks expected
+                // TODO: Only reset when *new* data has been acknowledged
+                ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
+                state.rto_ms = self.rto_ms;
+                state.rto_sum_ms = 0;
+            }
         }
     }
 
@@ -323,16 +411,8 @@ impl Endpoint {
                 self.fragment_tx
                     .acknowledge(stream_ack.unrel_id, stream_ack.rel_id);
 
-                if self.rto_timer_set {
-                    if stream_ack.segment_id == self.segment_tx.next_id() {
-                        // All caught up
-                        ctx.unset_timer(TimerName::Rto);
-                        self.rto_timer_set = false;
-                    } else {
-                        // More acks expected
-                        ctx.set_timer(TimerName::Rto, now_ms + RESEND_TIMEOUT_MS);
-                    }
-                }
+                self.update_rtt(stream_ack.segment_id, now_ms);
+                self.update_rto_timer(stream_ack.segment_id, now_ms, ctx);
             } else {
                 // Truncated packet?
                 return;
@@ -489,20 +569,34 @@ impl Endpoint {
             StateId::Active => match timer {
                 TimerName::Rto => {
                     println!("STREAM RESEND TIMEOUT");
-                    debug_assert!(self.rto_timer_set);
 
-                    // TODO: Is it correct to assume more data can be sent, considering an ack
-                    // has not been received that would have otherwise advanced send windows?
+                    let ref mut timer_state = self
+                        .rto_timer_state
+                        .as_mut()
+                        .expect("timer fired but state is none");
 
-                    // TODO: Should a sync frame be sent instead of data?
+                    timer_state.rto_sum_ms += timer_state.rto_ms;
 
-                    // TODO: Should the reliable fragment queue be reset here?
+                    if timer_state.rto_sum_ms >= self.timeout_time_ms {
+                        // No acks received for longer than user-specified timeout
+                        ctx.on_timeout();
+                        ctx.destroy_self();
+                    } else {
+                        // TODO: Is it correct to assume more data can be sent, considering an ack
+                        // has not been received that would have otherwise advanced send windows?
 
-                    // TODO: Time out connection
+                        // TODO: Should a sync frame be sent instead of data?
 
-                    self.flush_stream(false, false, now_ms, ctx);
+                        // TODO: Should the reliable fragment queue be reset here?
 
-                    ctx.set_timer(TimerName::Rto, now_ms + RESEND_TIMEOUT_MS);
+                        self.rto_ms *= 2;
+                        self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
+
+                        ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
+                        timer_state.rto_ms = self.rto_ms;
+
+                        self.flush_stream(false, false, now_ms, ctx);
+                    }
                 }
                 TimerName::Receive => {
                     println!("STREAM RECEIVE FLUSH TIMEOUT");
@@ -620,9 +714,12 @@ impl Endpoint {
                 }
 
                 if send_data {
+                    let segment_id = self.segment_tx.next_id();
+                    let segment_nonce = self.segment_tx.compute_next_nonce();
+
                     let header = frame::StreamSegmentHeader {
-                        id: self.segment_tx.next_id(),
-                        nonce: self.segment_tx.compute_next_nonce(),
+                        id: segment_id,
+                        nonce: segment_nonce,
                     };
 
                     println!("SEND SEGMENT {} {}", header.id, header.nonce);
@@ -636,9 +733,20 @@ impl Endpoint {
                     self.segment_tx.mark_sent(size_written);
 
                     // Acks are expected, set the resend timeout if not set already
-                    if !self.rto_timer_set {
-                        ctx.set_timer(TimerName::Rto, now_ms + RESEND_TIMEOUT_MS);
-                        self.rto_timer_set = true;
+                    if self.rto_timer_state.is_none() {
+                        ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
+                        self.rto_timer_state = Some(RtoTimerState {
+                            rto_ms: self.rto_ms,
+                            rto_sum_ms: 0,
+                        });
+                    }
+
+                    if self.rtt_timer_state.is_none() {
+                        self.rtt_timer_state = Some(RttTimerState {
+                            segment_id,
+                            send_time_ms: now_ms,
+                            expire_time_ms: now_ms + self.rto_ms,
+                        });
                     }
                 }
 

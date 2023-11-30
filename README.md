@@ -1,10 +1,8 @@
 # TODO
 
+  * Iron out resynchronization
+
   * Implement AIMD congestion control
-
-  * Implement RTT estimation
-
-  * Iron out RTO resynchronization
 
   * Implement server/client configuration
 
@@ -13,3 +11,5 @@
   * Implement multi-client test
 
   * Use CSPRNG when initializing SipHash key
+
+  * Implement Nagle's algorithm

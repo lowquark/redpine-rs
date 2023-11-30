@@ -215,16 +215,12 @@ mod tests {
     // Tests peek in all cases that we test pop
     fn peek_and_pop_sendable(send_buf: &mut TxBuffer) -> Option<(u32, FragmentRc)> {
         let peek_result = match send_buf.peek_sendable() {
-            Some(result) => {
-                Some((result.0, result.1.clone()))
-            },
+            Some(result) => Some((result.0, result.1.clone())),
             None => None,
         };
 
         let pop_result = match send_buf.pop_sendable() {
-            Some(result) => {
-                Some((result.0, result.1.clone()))
-            },
+            Some(result) => Some((result.0, result.1.clone())),
             None => None,
         };
 
