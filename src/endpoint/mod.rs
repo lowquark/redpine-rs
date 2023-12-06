@@ -2,6 +2,7 @@ use super::buffer;
 use super::frame;
 use super::SendMode;
 
+mod cc;
 mod segment_rx;
 mod segment_tx;
 
@@ -250,7 +251,7 @@ pub struct Endpoint {
     segment_tx: segment_tx::SegmentTx,
     fragment_tx: FragmentTxBuffers,
 
-    cwnd: usize,
+    cc_state: cc::AimdReno,
 
     tx_buffer: [u8; 1478],
 
@@ -283,7 +284,7 @@ impl Endpoint {
             remote_nonce,
             segment_tx: segment_tx::SegmentTx::new(0, segment_window_size),
             fragment_tx: FragmentTxBuffers::new(0, fragment_window_size, fragment_size),
-            cwnd: 15000,
+            cc_state: cc::AimdReno::new(fragment_size),
             tx_buffer: [0; 1478],
             rto_ms: INITIAL_RTO_MS,
             timeout_time_ms,
@@ -364,7 +365,7 @@ impl Endpoint {
                 self.rto_timer_state = None;
             } else {
                 // More acks expected
-                // TODO: Only reset when *new* data has been acknowledged
+                // TODO: Only reset when new data has been acknowledged
                 ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
                 state.rto_ms = self.rto_ms;
                 state.rto_sum_ms = 0;
@@ -400,12 +401,16 @@ impl Endpoint {
                     stream_ack.segment_id, stream_ack.segment_history, stream_ack.segment_checksum
                 );
 
+                // TODO: Only signal when new data has been acknowledged
+                self.cc_state.handle_ack();
+
                 if self.segment_tx.acknowledge(
                     stream_ack.segment_id,
                     stream_ack.segment_history.into(),
                     stream_ack.segment_checksum,
                 ) {
                     println!("DROP DETECTED");
+                    self.cc_state.handle_drop();
                 }
 
                 self.fragment_tx
@@ -589,6 +594,8 @@ impl Endpoint {
 
                         // TODO: Should the reliable fragment queue be reset here?
 
+                        self.cc_state.handle_timeout();
+
                         self.rto_ms *= 2;
                         self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
 
@@ -649,8 +656,10 @@ impl Endpoint {
             );
             */
 
+            let cwnd = self.cc_state.cwnd();
+
             let frame_window_limited = !self.segment_tx.can_send();
-            let congestion_window_limited = self.segment_tx.bytes_in_transit() >= self.cwnd;
+            let congestion_window_limited = self.segment_tx.bytes_in_transit() >= cwnd;
             let data_ready = self.fragment_tx.data_ready(now_ms);
 
             let send_data = !frame_window_limited && !congestion_window_limited && data_ready;

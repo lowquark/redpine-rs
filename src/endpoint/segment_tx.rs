@@ -189,7 +189,7 @@ impl SegmentTx {
         // This history queue incrementally tracks acknowledged segments from the receiver
         // until a drop is detected. A drop is detected when three segments have been received
         // after an unacknowledged segment, or any unacknowledged segment is behind the base ID
-        // by ≥32 IDs. When a drop is detected, the queue resets to the default state where all
+        // by >32 IDs. When a drop is detected, the queue resets to the default state where all
         // segments have been acknowledged in order to detect the next drop.
 
         //                     base (prev)    base' (latest ack)

@@ -2,8 +2,6 @@
 
   * Iron out resynchronization
 
-  * Implement AIMD congestion control
-
   * Implement server/client configuration
 
   * Implement handshake errors
