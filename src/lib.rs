@@ -2,13 +2,13 @@
 
 https://intronetworks.cs.luc.edu/current/html/reno.html
 
-Pigeon post makes a distinction between packets and frames.
+UFlow makes a distinction between packets and frames.
 
 # Congestion window
 
-Pigeon post uses a rolling window to respond to congestion in a manner similar to TCP Reno. As a
-window of packets is finished, the frame window sized (cwnd) is adjusted to reflect whether losses
-were encountered in that window.
+UFlow uses a rolling window to respond to congestion in a manner similar to TCP Reno. As a window of
+packets is finished, the frame window sized (cwnd) is adjusted to reflect whether losses were
+encountered in that window.
 
 In slow start, each ack increases cwnd by:
 
@@ -97,7 +97,7 @@ will be delivered subject to the reordering above. (TODO: Does a timeout flush t
 
 # Handshake
 
-The handshake used by pigeon post follows the classic SYN, SYN+ACK, ACK procedure used by TCP. A
+The handshake used by UFlow follows the classic SYN, SYN+ACK, ACK procedure used by TCP. A
 SipHash MAC is used to alleviate the server from having to track pending client connections in
 memory.
 
@@ -114,11 +114,11 @@ buffering at the server.
 
 # Throttling algorithm
 
-#Pigeon post uses a preemptive leaky bucket algorithm to enforce a maximum send rate. That is, if the
+#UFlow uses a preemptive leaky bucket algorithm to enforce a maximum send rate. That is, if the
 #counter is greater than or equal to zero, a frame may be sent, and its size subtracted from the
 #counter. At a later time, tokens will be added to the bucket, and more frames may be sent again.
 
-Pidgeon post places a maximum on cwnd which is updated as RTT estimates are computed. That is:
+UFlow places a maximum on cwnd which is updated as RTT estimates are computed. That is:
 
   cwnd_max <- RTT * max_bandwidth
 
