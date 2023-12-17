@@ -89,7 +89,5 @@ pub struct StreamAck {
 
 #[derive(Debug)]
 pub struct StreamSync {
-    pub segment_id: u32,
-    pub unrel_id: u32,
-    pub rel_id: u32,
+    pub next_segment_id: u32,
 }

@@ -1,6 +1,5 @@
 use super::FragmentRc;
 use super::FragmentRef;
-use super::Window;
 
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -34,18 +33,16 @@ pub struct TxBuffer {
     fragments: VecDeque<TxEntry>,
     next_fragment_id: u32,
     fragment_size: usize,
-    send_window: Window,
 }
 
 impl TxBuffer {
-    pub fn new(base_id: u32, window_size: u32, fragment_size: usize) -> Self {
+    pub fn new(base_id: u32, fragment_size: usize) -> Self {
         assert!(fragment_size > 0);
 
         Self {
             fragments: VecDeque::new(),
             next_fragment_id: base_id,
             fragment_size,
-            send_window: Window::new(base_id, window_size),
         }
     }
 
@@ -103,43 +100,23 @@ impl TxBuffer {
 
     pub fn peek_sendable(&self) -> Option<(u32, &FragmentRc)> {
         if let Some(entry) = self.fragments.front() {
-            if self.send_window.contains(self.next_fragment_id) {
-                let fragment_id = self.next_fragment_id;
+            let fragment_id = self.next_fragment_id;
 
-                return Some((fragment_id, &entry.fragment));
-            }
+            return Some((fragment_id, &entry.fragment));
         }
 
         return None;
     }
 
     pub fn pop_sendable(&mut self) -> Option<(u32, FragmentRc)> {
-        if !self.fragments.is_empty() {
-            if self.send_window.contains(self.next_fragment_id) {
-                let entry = self.fragments.pop_front().unwrap();
+        if let Some(entry) = self.fragments.pop_front() {
+            let fragment_id = self.next_fragment_id;
+            self.next_fragment_id = self.next_fragment_id.wrapping_add(1);
 
-                let fragment_id = self.next_fragment_id;
-                self.next_fragment_id = self.next_fragment_id.wrapping_add(1);
-
-                return Some((fragment_id, entry.fragment));
-            }
+            return Some((fragment_id, entry.fragment));
         }
 
         return None;
-    }
-
-    pub fn acknowledge(&mut self, new_base_id: u32) -> bool {
-        // For an ack to be valid, the new base ID may not exceed the next ID to be sent
-        let ack_delta_max = self.next_fragment_id.wrapping_sub(self.send_window.base_id);
-        let ack_delta = new_base_id.wrapping_sub(self.send_window.base_id);
-
-        if ack_delta <= ack_delta_max {
-            // Advance the send window accordingly
-            self.send_window.base_id = new_base_id;
-            return true;
-        } else {
-            return false;
-        }
     }
 }
 
@@ -149,18 +126,17 @@ pub struct PacketBuild {
 
 pub struct RxBuffer {
     fragment_size: usize,
-    receive_window: Window,
+    base_id: u32,
     current_build: Option<PacketBuild>,
 }
 
 impl RxBuffer {
-    pub fn new(base_id: u32, window_size: u32, fragment_size: usize) -> Self {
-        assert!(window_size > 0);
+    pub fn new(base_id: u32, fragment_size: usize) -> Self {
         assert!(fragment_size > 0);
 
         Self {
             fragment_size,
-            receive_window: Window::new(base_id, window_size),
+            base_id,
             current_build: None,
         }
     }
@@ -180,9 +156,7 @@ impl RxBuffer {
     }
 
     pub fn receive(&mut self, fragment_id: u32, fragment: &FragmentRef) -> Option<Box<[u8]>> {
-        if self.receive_window.contains(fragment_id)
-            && Self::fragment_is_valid(fragment, self.fragment_size)
-        {
+        if Self::fragment_is_valid(fragment, self.fragment_size) {
             if fragment.first {
                 // Start a new packet
 
@@ -191,7 +165,7 @@ impl RxBuffer {
                     self.current_build = None;
 
                     // Expect subsequent fragment
-                    self.receive_window.base_id = fragment_id.wrapping_add(1);
+                    self.base_id = fragment_id.wrapping_add(1);
 
                     // Return clone of input slice (fragment data is referenced directly from its
                     // containing frame)
@@ -204,17 +178,17 @@ impl RxBuffer {
                     self.current_build = Some(PacketBuild { buffer });
 
                     // Expect subsequent fragment
-                    self.receive_window.base_id = fragment_id.wrapping_add(1);
+                    self.base_id = fragment_id.wrapping_add(1);
 
                     return None;
                 }
-            } else if fragment_id == self.receive_window.base_id {
+            } else if fragment_id == self.base_id {
                 // Extend existing packet
                 if let Some(ref mut current_build) = self.current_build {
                     current_build.buffer.extend_from_slice(fragment.data);
 
                     // Expect subsequent fragment
-                    self.receive_window.base_id = fragment_id.wrapping_add(1);
+                    self.base_id = fragment_id.wrapping_add(1);
 
                     // Return if finished
                     if fragment.last {
@@ -231,8 +205,12 @@ impl RxBuffer {
         return None;
     }
 
+    pub fn reset(&mut self) {
+        self.current_build = None;
+    }
+
     pub fn next_expected_id(&self) -> u32 {
-        self.receive_window.base_id
+        self.base_id
     }
 }
 
@@ -299,24 +277,13 @@ mod tests {
         assert_eq!(peek_and_pop_sendable(send_buf), None);
     }
 
-    fn expect_ack(send_buf: &mut TxBuffer, new_base_id: u32) {
-        assert_eq!(send_buf.acknowledge(new_base_id), true);
-    }
-
-    fn expect_ack_fail(send_buf: &mut TxBuffer, new_base_id: u32) {
-        assert_eq!(send_buf.acknowledge(new_base_id), false);
-    }
-
     fn fragmentation_trial(
         initial_base_id: u32,
-        window_size: u32,
         fragment_size: usize,
         packet_data: &Box<[u8]>,
         ranges: &[Range<usize>],
     ) {
-        assert!(ranges.len() <= window_size as usize);
-
-        let mut send_buf = TxBuffer::new(initial_base_id, window_size, fragment_size);
+        let mut send_buf = TxBuffer::new(initial_base_id, fragment_size);
 
         // Enqueue a single packet
         send_buf.push(packet_data.clone(), u64::max_value());
@@ -394,7 +361,6 @@ mod tests {
         ];
 
         const FRAGMENT_SIZE: usize = 4;
-        const WINDOW_SIZE: u32 = 16;
         const ID_SWEEP_SIZE: u32 = 4;
 
         let mut initial_base_id = 0_u32.wrapping_sub(ID_SWEEP_SIZE);
@@ -403,133 +369,12 @@ mod tests {
             for trial in trials.iter() {
                 fragmentation_trial(
                     initial_base_id,
-                    WINDOW_SIZE,
                     FRAGMENT_SIZE,
                     &trial.packet_data,
                     &trial.ranges,
                 )
             }
 
-            initial_base_id = initial_base_id.wrapping_add(1);
-        }
-    }
-
-    fn ack_advancement_trial(initial_base_id: u32, block_size: u32, window_size: u32) {
-        assert!(block_size > 0);
-        assert!(block_size <= window_size);
-
-        const FRAGMENT_SIZE: usize = 8;
-
-        let mut send_buf = TxBuffer::new(initial_base_id, window_size, FRAGMENT_SIZE);
-
-        // Fill send buffer with thrice as many fragments as the send window size
-        for i in 0..3 * window_size {
-            push_basic(&mut send_buf, initial_base_id.wrapping_add(i));
-        }
-
-        let mut next_pop_id = initial_base_id;
-        let mut queue_size = 3 * window_size;
-
-        // Pop all currently sendable fragments
-        for _ in 0..window_size {
-            expect_pop_basic(&mut send_buf, next_pop_id);
-            next_pop_id = next_pop_id.wrapping_add(1);
-            queue_size -= 1;
-        }
-        expect_pop_fail(&mut send_buf);
-
-        // Ack & send remaining packets in blocks of block_size
-        let mut next_ack_id = initial_base_id.wrapping_add(block_size);
-
-        loop {
-            // Permit sending block_size more packets
-            expect_ack(&mut send_buf, next_ack_id);
-            next_ack_id = next_ack_id.wrapping_add(block_size);
-
-            // block_size fragments are no longer window-limited, assuming the queue is not empty
-            for _ in 0..block_size.min(queue_size) {
-                expect_pop_basic(&mut send_buf, next_pop_id);
-                next_pop_id = next_pop_id.wrapping_add(1);
-                queue_size -= 1;
-            }
-            expect_pop_fail(&mut send_buf);
-
-            if queue_size == 0 {
-                return;
-            }
-        }
-    }
-
-    #[test]
-    fn ack_advancement() {
-        const WINDOW_SIZE: u32 = 16;
-        const ID_SWEEP_SIZE: u32 = 3 * WINDOW_SIZE;
-
-        let mut initial_base_id = 0_u32.wrapping_sub(ID_SWEEP_SIZE);
-
-        for _ in 0..=ID_SWEEP_SIZE {
-            for block_size in 1..=WINDOW_SIZE {
-                ack_advancement_trial(initial_base_id, block_size, WINDOW_SIZE);
-            }
-            initial_base_id = initial_base_id.wrapping_add(1);
-        }
-    }
-
-    fn invalid_acks_trial(initial_base_id: u32, window_size: u32) {
-        const FRAGMENT_SIZE: usize = 8;
-        let test_margin_size: u32 = window_size;
-
-        for send_count in 0..window_size {
-            let mut send_buf = TxBuffer::new(initial_base_id, window_size, FRAGMENT_SIZE);
-
-            // Start with a filled send window
-            for i in 0..window_size {
-                push_basic(&mut send_buf, initial_base_id.wrapping_add(i));
-            }
-
-            // Send some fragments
-            for i in 0..send_count {
-                expect_pop_basic(&mut send_buf, initial_base_id.wrapping_add(i));
-            }
-
-            // Acks beyond valid range fail
-            for i in 1..test_margin_size {
-                expect_ack_fail(&mut send_buf, initial_base_id.wrapping_sub(i));
-                expect_ack_fail(
-                    &mut send_buf,
-                    initial_base_id.wrapping_add(send_count).wrapping_add(i),
-                );
-            }
-
-            // Sequential intermittent IDs each succeed
-            for i in 0..=send_count {
-                expect_ack(&mut send_buf, initial_base_id.wrapping_add(i));
-            }
-
-            // A second ack succeeds
-            expect_ack(&mut send_buf, initial_base_id.wrapping_add(send_count));
-
-            // But its neighbors do not
-            expect_ack_fail(
-                &mut send_buf,
-                initial_base_id.wrapping_add(send_count).wrapping_sub(1),
-            );
-            expect_ack_fail(
-                &mut send_buf,
-                initial_base_id.wrapping_add(send_count).wrapping_add(1),
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_acks() {
-        const WINDOW_SIZE: u32 = 16;
-        const ID_SWEEP_SIZE: u32 = 2 * WINDOW_SIZE;
-
-        let mut initial_base_id = 0_u32.wrapping_sub(ID_SWEEP_SIZE);
-
-        for _ in 0..=ID_SWEEP_SIZE {
-            invalid_acks_trial(initial_base_id, WINDOW_SIZE);
             initial_base_id = initial_base_id.wrapping_add(1);
         }
     }

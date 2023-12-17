@@ -16,7 +16,7 @@ pub struct TxBuffer {
 }
 
 impl TxBuffer {
-    pub fn new(base_id: u32, window_size: u32, fragment_size: usize) -> Self {
+    pub fn new(base_id: u32, fragment_size: usize, window_size: u32) -> Self {
         assert!(window_size > 0);
         assert!(fragment_size > 0);
 
@@ -288,7 +288,7 @@ mod tests {
     ) {
         assert!(ranges.len() <= window_size as usize);
 
-        let mut send_buf = TxBuffer::new(initial_base_id, window_size, fragment_size);
+        let mut send_buf = TxBuffer::new(initial_base_id, fragment_size, window_size);
 
         // Enqueue a single packet
         send_buf.push(packet_data.clone());
@@ -391,7 +391,7 @@ mod tests {
 
         const FRAGMENT_SIZE: usize = 8;
 
-        let mut send_buf = TxBuffer::new(initial_base_id, window_size, FRAGMENT_SIZE);
+        let mut send_buf = TxBuffer::new(initial_base_id, FRAGMENT_SIZE, window_size);
 
         // Fill send buffer with thrice as many fragments as the send window size
         for i in 0..3 * window_size {
@@ -451,7 +451,7 @@ mod tests {
         let test_margin_size: u32 = window_size;
 
         for send_count in 0..window_size {
-            let mut send_buf = TxBuffer::new(initial_base_id, window_size, FRAGMENT_SIZE);
+            let mut send_buf = TxBuffer::new(initial_base_id, FRAGMENT_SIZE, window_size);
 
             // Start with a filled send window
             for i in 0..window_size {
@@ -509,7 +509,7 @@ mod tests {
         const FRAGMENT_SIZE: usize = 8;
 
         for send_count in 0..=window_size {
-            let mut send_buf = TxBuffer::new(initial_base_id, window_size, FRAGMENT_SIZE);
+            let mut send_buf = TxBuffer::new(initial_base_id, FRAGMENT_SIZE, window_size);
 
             // Start with a filled send window
             for i in 0..window_size {

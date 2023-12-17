@@ -112,8 +112,8 @@ struct FragmentTxBuffers {
 impl FragmentTxBuffers {
     pub fn new(window_base_id: u32, window_size: u32, fragment_size: usize) -> Self {
         Self {
-            unrel: buffer::UnreliableTxBuffer::new(window_base_id, window_size, fragment_size),
-            rel: buffer::ReliableTxBuffer::new(window_base_id, window_size, fragment_size),
+            unrel: buffer::UnreliableTxBuffer::new(window_base_id, fragment_size),
+            rel: buffer::ReliableTxBuffer::new(window_base_id, fragment_size, window_size),
             prio_state: TxPrioState::new(1, 2, 10_000, 20_000),
         }
     }
@@ -132,11 +132,7 @@ impl FragmentTxBuffers {
         }
     }
 
-    pub fn acknowledge(&mut self, unrel_id: Option<u32>, rel_id: Option<u32>) {
-        if let Some(unrel_id) = unrel_id {
-            self.unrel.acknowledge(unrel_id);
-        }
-
+    pub fn acknowledge(&mut self, rel_id: Option<u32>) {
         if let Some(rel_id) = rel_id {
             self.rel.acknowledge(rel_id);
         }
@@ -263,7 +259,7 @@ pub struct Endpoint {
     rtt_timer_state: Option<RttTimerState>,
 
     // Receiver state
-    segment_rx_buffer: segment_rx::SegmentRx,
+    segment_rx: segment_rx::SegmentRx,
     unreliable_rx: buffer::UnreliableRxBuffer,
     reliable_rx: buffer::ReliableRxBuffer,
 }
@@ -291,8 +287,8 @@ impl Endpoint {
             rto_timer_state: None,
             rtt_state: None,
             rtt_timer_state: None,
-            segment_rx_buffer: segment_rx::SegmentRx::new(0, segment_window_size, fragment_size),
-            unreliable_rx: buffer::UnreliableRxBuffer::new(0, fragment_window_size, fragment_size),
+            segment_rx: segment_rx::SegmentRx::new(0, segment_window_size, fragment_size),
+            unreliable_rx: buffer::UnreliableRxBuffer::new(0, fragment_size),
             reliable_rx: buffer::ReliableRxBuffer::new(0, fragment_size),
         }
     }
@@ -395,29 +391,28 @@ impl Endpoint {
         let mut ack_rel = false;
 
         if read_ack {
-            if let Some(stream_ack) = frame_reader.read::<frame::StreamAck>() {
+            if let Some(ack) = frame_reader.read::<frame::StreamAck>() {
                 println!(
                     "RECEIVE ACK {}, {:05b}, {}",
-                    stream_ack.segment_id, stream_ack.segment_history, stream_ack.segment_checksum
+                    ack.segment_id, ack.segment_history, ack.segment_checksum
                 );
 
                 // TODO: Only signal when new data has been acknowledged
                 self.cc_state.handle_ack();
 
                 if self.segment_tx.acknowledge(
-                    stream_ack.segment_id,
-                    stream_ack.segment_history.into(),
-                    stream_ack.segment_checksum,
+                    ack.segment_id,
+                    ack.segment_history.into(),
+                    ack.segment_checksum,
                 ) {
                     println!("DROP DETECTED");
                     self.cc_state.handle_drop();
                 }
 
-                self.fragment_tx
-                    .acknowledge(stream_ack.unrel_id, stream_ack.rel_id);
+                self.fragment_tx.acknowledge(ack.rel_id);
 
-                self.update_rtt(stream_ack.segment_id, now_ms);
-                self.update_rto_timer(stream_ack.segment_id, now_ms, ctx);
+                self.update_rtt(ack.segment_id, now_ms);
+                self.update_rto_timer(ack.segment_id, now_ms, ctx);
             } else {
                 // Truncated packet?
                 return;
@@ -425,14 +420,14 @@ impl Endpoint {
         }
 
         if read_data {
-            if let Some(stream_data_header) = frame_reader.read::<frame::StreamSegmentHeader>() {
-                let segment_id = stream_data_header.id;
-                let segment_nonce = stream_data_header.nonce;
+            if let Some(segment_header) = frame_reader.read::<frame::StreamSegmentHeader>() {
+                let segment_id = segment_header.id;
+                let segment_nonce = segment_header.nonce;
                 let segment_bytes = frame_reader.remaining_bytes();
 
                 println!("RECEIVE SEGMENT {} {}", segment_id, segment_nonce);
 
-                self.segment_rx_buffer.receive(
+                self.segment_rx.receive(
                     segment_id,
                     segment_nonce,
                     segment_bytes,
@@ -474,6 +469,53 @@ impl Endpoint {
         self.flush_stream(ack_unrel, ack_rel, now_ms, ctx);
     }
 
+    fn handle_stream_sync_frame<C>(&mut self, payload_bytes: &[u8], now_ms: u64, ctx: &mut C)
+    where
+        C: HostContext,
+    {
+        let mut frame_reader = frame::serial::PayloadReader::new(payload_bytes);
+
+        if let Some(sync) = frame_reader.read::<frame::StreamSync>() {
+            self.segment_rx.sync(sync.next_segment_id, |segment_bytes: &[u8]| {
+                let mut frame_reader = frame::serial::PayloadReader::new(segment_bytes);
+
+                while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
+                    let unrel = datagram.unrel;
+
+                    let id = datagram.id;
+
+                    let ref fragment = buffer::FragmentRef {
+                        first: datagram.first,
+                        last: datagram.last,
+                        data: datagram.data,
+                    };
+
+                    if unrel {
+                        if let Some(packet) = self.unreliable_rx.receive(id, fragment) {
+                            ctx.on_receive(packet);
+                        }
+                    } else {
+                        if let Some(packet) = self.reliable_rx.receive(id, fragment) {
+                            ctx.on_receive(packet);
+                        }
+                    }
+                }
+            });
+
+            // The unreliable rx buffer may be expecting fragment IDs that are made ambiguous by
+            // advancing the segment rx window. Thus, any in-progress packets must be cleared in
+            // order to avoid combining unrelated fragments. Since all fragments which were not
+            // delivered can be assumed to have been dropped (the sender only sends a sync frame
+            // after an RTO), this will not artificially introduce data loss.
+            self.unreliable_rx.reset();
+
+            // Send an ack in response to sync
+            // TODO: This indicates new reliable data has been received, which is very unlikely
+            // TODO: There is no point in attempting to flush data
+            self.flush_stream(true, true, now_ms, ctx);
+        }
+    }
+
     fn validate_close_frame(&self, payload_bytes: &[u8]) -> bool {
         use frame::serial::SimplePayloadRead;
 
@@ -508,7 +550,10 @@ impl Endpoint {
                 frame::FrameType::StreamSegment
                 | frame::FrameType::StreamAck
                 | frame::FrameType::StreamSegmentAck => {
-                    self.handle_stream_frame(frame_type, payload_bytes, now_ms, ctx)
+                    self.handle_stream_frame(frame_type, payload_bytes, now_ms, ctx);
+                }
+                frame::FrameType::StreamSync => {
+                    self.handle_stream_sync_frame(payload_bytes, now_ms, ctx);
                 }
                 frame::FrameType::Close => {
                     if self.validate_close_frame(payload_bytes) {
@@ -585,23 +630,28 @@ impl Endpoint {
                     if timer_state.rto_sum_ms >= self.timeout_time_ms {
                         // No acks received for longer than user-specified timeout
                         ctx.on_timeout();
+
+                        // I've seen things you people wouldn't believe... Attack ships on fire off
+                        // the shoulder of Orion... I watched C-beams glitter in the dark near the
+                        // Tannhäuser Gate. All those moments will be lost in time, like tears in
+                        // rain... Time to die.
                         ctx.destroy_self();
                     } else {
-                        // TODO: Is it correct to assume more data can be sent, considering an ack
-                        // has not been received that would have otherwise advanced send windows?
-
-                        // TODO: Should a sync frame be sent instead of data?
-
-                        // TODO: Should the reliable fragment queue be reset here?
-
-                        self.cc_state.handle_timeout();
-
                         self.rto_ms *= 2;
                         self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
 
                         ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
                         timer_state.rto_ms = self.rto_ms;
 
+                        // Notify congestion control of timeout
+                        self.cc_state.handle_timeout();
+
+                        // TODO: Reset the reliable fragment tx buffer
+
+                        // Attempt to resynchronize now that the pipe has drained
+                        self.send_stream_sync_frame(self.segment_tx.next_id(), ctx);
+
+                        // Don't waste an opportunity to send data
                         self.flush_stream(false, false, now_ms, ctx);
                     }
                 }
@@ -687,9 +737,9 @@ impl Endpoint {
                     frame::serial::FrameWriter::new(&mut self.tx_buffer, frame_type);
 
                 if send_ack {
-                    let segment_id = self.segment_rx_buffer.next_expected_id();
+                    let segment_id = self.segment_rx.next_expected_id();
                     let (segment_history, segment_checksum) =
-                        self.segment_rx_buffer.next_ack_info();
+                        self.segment_rx.next_ack_info();
 
                     println!(
                         "SEND ACK {}, {:05b}, {}",
@@ -798,6 +848,19 @@ impl Endpoint {
 
         let frame = frame::CloseAckFrame {
             remote_nonce: self.remote_nonce,
+        };
+
+        ctx.send_frame(frame.write(&mut self.tx_buffer));
+    }
+
+    fn send_stream_sync_frame<C>(&mut self, next_segment_id: u32, ctx: &mut C)
+    where
+        C: HostContext,
+    {
+        use frame::serial::SimpleFrameWrite;
+
+        let frame = frame::StreamSync {
+            next_segment_id,
         };
 
         ctx.send_frame(frame.write(&mut self.tx_buffer));

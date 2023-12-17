@@ -16,6 +16,7 @@ pub const CLOSE_SIZE: usize = 4;
 pub const CLOSE_ACK_SIZE: usize = 4;
 pub const STREAM_SEGMENT_HEADER_SIZE: usize = 5;
 pub const STREAM_ACK_SIZE: usize = 13;
+pub const STREAM_SYNC_SIZE: usize = 4;
 
 const DATAGRAM_HEADER_SIZE: usize = 1 + 4 + 2;
 const DATAGRAM_DATA_SIZE_MAX: usize = u16::max_value() as usize;
@@ -404,6 +405,20 @@ impl BlockSerial for StreamAck {
     }
 }
 
+impl BlockSerial for StreamSync {
+    const SIZE: usize = STREAM_SYNC_SIZE;
+
+    unsafe fn read(rd: &mut Reader) -> Self {
+        let next_segment_id = rd.read_u32();
+
+        Self { next_segment_id }
+    }
+
+    unsafe fn write(wr: &mut Writer, obj: &Self) {
+        wr.write_u32(obj.next_segment_id);
+    }
+}
+
 impl<'a> Serial<'a> for Datagram<'a> {
     fn read(src: &'a [u8]) -> Option<(Self, usize)> {
         if src.len() < DATAGRAM_HEADER_SIZE {
@@ -658,6 +673,12 @@ impl SimpleFrame for CloseAckFrame {
     const FRAME_TYPE: FrameType = FrameType::CloseAck;
     const FRAME_SIZE: usize = Self::PAYLOAD_SIZE + FRAME_OVERHEAD_SIZE;
     const PAYLOAD_SIZE: usize = HANDSHAKE_BETA_ACK_SIZE;
+}
+
+impl SimpleFrame for StreamSync {
+    const FRAME_TYPE: FrameType = FrameType::StreamSync;
+    const FRAME_SIZE: usize = Self::PAYLOAD_SIZE + FRAME_OVERHEAD_SIZE;
+    const PAYLOAD_SIZE: usize = STREAM_SYNC_SIZE;
 }
 
 pub trait SimpleFrameWrite {

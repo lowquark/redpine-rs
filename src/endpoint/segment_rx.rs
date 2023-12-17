@@ -170,6 +170,50 @@ impl SegmentRx {
         return self.len;
     }
 
+    pub fn sync<F>(&mut self, next_segment_id: u32, mut cb: F)
+    where
+        F: FnMut(&[u8]),
+    {
+        // Only accept syncs which exceed the last outstanding segment (if any)
+        let delta = next_segment_id.wrapping_sub(self.window.base_id);
+
+        let min_delta = match self.len {
+            1 => self.slot_0.id.wrapping_sub(self.window.base_id),
+            2 => self.slot_1.id.wrapping_sub(self.window.base_id),
+            _ => self.window.base_id,
+        };
+
+        if delta > min_delta && delta <= self.window.size {
+            // Deliver outstanding segments
+            if self.len > 0 {
+                let slot_0_data = &self.slot_0.data[..self.slot_0.len];
+                let slot_0_delta = self.slot_0.id.wrapping_sub(self.window.base_id);
+                cb(slot_0_data);
+
+                self.push_history_skips(slot_0_delta);
+                self.push_history_ack(self.slot_0.nonce);
+                self.advance_window_past(self.slot_0.id);
+
+                if self.len == 2 {
+                    let slot_1_data = &self.slot_1.data[..self.slot_1.len];
+                    let slot_1_delta = self.slot_1.id.wrapping_sub(self.window.base_id);
+                    cb(slot_1_data);
+
+                    self.push_history_skips(slot_1_delta);
+                    self.push_history_ack(self.slot_1.nonce);
+                    self.advance_window_past(self.slot_1.id);
+                }
+            }
+
+            self.len = 0;
+
+            // Advance window to complete sync
+            let remaining_delta = next_segment_id.wrapping_sub(self.window.base_id);
+            self.push_history_skips(remaining_delta);
+            self.window.base_id = next_segment_id;
+        }
+    }
+
     pub fn next_expected_id(&self) -> u32 {
         self.window.base_id
     }
