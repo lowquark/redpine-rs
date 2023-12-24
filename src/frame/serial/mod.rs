@@ -15,7 +15,7 @@ pub const HANDSHAKE_BETA_ACK_SIZE: usize = 4;
 pub const CLOSE_SIZE: usize = 4;
 pub const CLOSE_ACK_SIZE: usize = 4;
 pub const STREAM_SEGMENT_HEADER_SIZE: usize = 5;
-pub const STREAM_ACK_SIZE: usize = 13;
+pub const STREAM_ACK_SIZE: usize = 9;
 pub const STREAM_SYNC_SIZE: usize = 4;
 
 const DATAGRAM_HEADER_SIZE: usize = 1 + 4 + 2;
@@ -369,29 +369,24 @@ impl BlockSerial for StreamAck {
     unsafe fn read(rd: &mut Reader) -> Self {
         let info = rd.read_u8();
         let segment_id = rd.read_u32();
-        let unrel_id = rd.read_u32();
-        let rel_id = rd.read_u32();
+        let rel_fragment_id = rd.read_u32();
 
         Self {
             segment_id,
             segment_history: info & 0x1F,
             segment_checksum: info & 0x20 != 0,
-            unrel_id: if info & 0x40 != 0 {
-                Some(unrel_id)
+            rel_fragment_id: if info & 0x80 != 0 {
+                Some(rel_fragment_id)
             } else {
                 None
             },
-            rel_id: if info & 0x80 != 0 { Some(rel_id) } else { None },
         }
     }
 
     unsafe fn write(wr: &mut Writer, obj: &Self) {
         let mut info: u8 = 0;
-        if obj.rel_id.is_some() {
+        if obj.rel_fragment_id.is_some() {
             info |= 0x80;
-        }
-        if obj.unrel_id.is_some() {
-            info |= 0x40;
         }
         if obj.segment_checksum {
             info |= 0x20;
@@ -400,8 +395,7 @@ impl BlockSerial for StreamAck {
 
         wr.write_u8(info);
         wr.write_u32(obj.segment_id);
-        wr.write_u32(obj.unrel_id.unwrap_or(0));
-        wr.write_u32(obj.rel_id.unwrap_or(0));
+        wr.write_u32(obj.rel_fragment_id.unwrap_or(0));
     }
 }
 

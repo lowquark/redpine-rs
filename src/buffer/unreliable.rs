@@ -208,10 +208,6 @@ impl RxBuffer {
     pub fn reset(&mut self) {
         self.current_build = None;
     }
-
-    pub fn next_expected_id(&self) -> u32 {
-        self.base_id
-    }
 }
 
 #[cfg(test)]

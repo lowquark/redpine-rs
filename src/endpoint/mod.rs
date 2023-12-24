@@ -132,9 +132,9 @@ impl FragmentTxBuffers {
         }
     }
 
-    pub fn acknowledge(&mut self, rel_id: Option<u32>) {
-        if let Some(rel_id) = rel_id {
-            self.rel.acknowledge(rel_id);
+    pub fn acknowledge(&mut self, rel_fragment_id: Option<u32>) {
+        if let Some(id) = rel_fragment_id {
+            self.rel.acknowledge(id);
         }
     }
 
@@ -387,7 +387,7 @@ impl Endpoint {
             _ => panic!("NANI?"),
         };
 
-        let mut ack_unrel = false;
+        let mut send_ack = false;
         let mut ack_rel = false;
 
         if read_ack {
@@ -409,7 +409,7 @@ impl Endpoint {
                     self.cc_state.handle_drop();
                 }
 
-                self.fragment_tx.acknowledge(ack.rel_id);
+                self.fragment_tx.acknowledge(ack.rel_fragment_id);
 
                 self.update_rtt(ack.segment_id, now_ms);
                 self.update_rto_timer(ack.segment_id, now_ms, ctx);
@@ -449,8 +449,6 @@ impl Endpoint {
                                 if let Some(packet) = self.unreliable_rx.receive(id, fragment) {
                                     ctx.on_receive(packet);
                                 }
-
-                                ack_unrel = true;
                             } else {
                                 if let Some(packet) = self.reliable_rx.receive(id, fragment) {
                                     ctx.on_receive(packet);
@@ -458,6 +456,8 @@ impl Endpoint {
 
                                 ack_rel = true;
                             }
+
+                            send_ack = true;
                         }
                     },
                 );
@@ -466,7 +466,7 @@ impl Endpoint {
             }
         }
 
-        self.flush_stream(ack_unrel, ack_rel, now_ms, ctx);
+        self.flush_stream(send_ack, ack_rel, now_ms, ctx);
     }
 
     fn handle_stream_sync_frame<C>(&mut self, payload_bytes: &[u8], now_ms: u64, ctx: &mut C)
@@ -476,31 +476,32 @@ impl Endpoint {
         let mut frame_reader = frame::serial::PayloadReader::new(payload_bytes);
 
         if let Some(sync) = frame_reader.read::<frame::StreamSync>() {
-            self.segment_rx.sync(sync.next_segment_id, |segment_bytes: &[u8]| {
-                let mut frame_reader = frame::serial::PayloadReader::new(segment_bytes);
+            self.segment_rx
+                .sync(sync.next_segment_id, |segment_bytes: &[u8]| {
+                    let mut frame_reader = frame::serial::PayloadReader::new(segment_bytes);
 
-                while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
-                    let unrel = datagram.unrel;
+                    while let Some(datagram) = frame_reader.read::<frame::Datagram>() {
+                        let unrel = datagram.unrel;
 
-                    let id = datagram.id;
+                        let id = datagram.id;
 
-                    let ref fragment = buffer::FragmentRef {
-                        first: datagram.first,
-                        last: datagram.last,
-                        data: datagram.data,
-                    };
+                        let ref fragment = buffer::FragmentRef {
+                            first: datagram.first,
+                            last: datagram.last,
+                            data: datagram.data,
+                        };
 
-                    if unrel {
-                        if let Some(packet) = self.unreliable_rx.receive(id, fragment) {
-                            ctx.on_receive(packet);
-                        }
-                    } else {
-                        if let Some(packet) = self.reliable_rx.receive(id, fragment) {
-                            ctx.on_receive(packet);
+                        if unrel {
+                            if let Some(packet) = self.unreliable_rx.receive(id, fragment) {
+                                ctx.on_receive(packet);
+                            }
+                        } else {
+                            if let Some(packet) = self.reliable_rx.receive(id, fragment) {
+                                ctx.on_receive(packet);
+                            }
                         }
                     }
-                }
-            });
+                });
 
             // The unreliable rx buffer may be expecting fragment IDs that are made ambiguous by
             // advancing the segment rx window. Thus, any in-progress packets must be cleared in
@@ -510,8 +511,6 @@ impl Endpoint {
             self.unreliable_rx.reset();
 
             // Send an ack in response to sync
-            // TODO: This indicates new reliable data has been received, which is very unlikely
-            // TODO: There is no point in attempting to flush data
             self.flush_stream(true, true, now_ms, ctx);
         }
     }
@@ -690,12 +689,10 @@ impl Endpoint {
         }
     }
 
-    fn flush_stream<C>(&mut self, ack_unrel: bool, ack_rel: bool, now_ms: u64, ctx: &mut C)
+    fn flush_stream<C>(&mut self, mut send_ack: bool, ack_rel: bool, now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
-        let mut send_ack = ack_unrel || ack_rel;
-
         loop {
             /*
             println!(
@@ -738,21 +735,14 @@ impl Endpoint {
 
                 if send_ack {
                     let segment_id = self.segment_rx.next_expected_id();
-                    let (segment_history, segment_checksum) =
-                        self.segment_rx.next_ack_info();
+                    let (segment_history, segment_checksum) = self.segment_rx.next_ack_info();
 
                     println!(
                         "SEND ACK {}, {:05b}, {}",
                         segment_id, segment_history, segment_checksum
                     );
 
-                    let unrel_id = if ack_unrel {
-                        Some(self.unreliable_rx.next_expected_id())
-                    } else {
-                        None
-                    };
-
-                    let rel_id = if ack_rel {
+                    let rel_fragment_id = if ack_rel {
                         Some(self.reliable_rx.next_expected_id())
                     } else {
                         None
@@ -762,8 +752,7 @@ impl Endpoint {
                         segment_id,
                         segment_history,
                         segment_checksum,
-                        unrel_id,
-                        rel_id,
+                        rel_fragment_id,
                     };
 
                     frame_writer.write(&ack);
@@ -859,9 +848,7 @@ impl Endpoint {
     {
         use frame::serial::SimpleFrameWrite;
 
-        let frame = frame::StreamSync {
-            next_segment_id,
-        };
+        let frame = frame::StreamSync { next_segment_id };
 
         ctx.send_frame(frame.write(&mut self.tx_buffer));
     }

@@ -82,9 +82,7 @@ pub struct StreamAck {
     pub segment_id: u32,
     pub segment_history: u8,
     pub segment_checksum: bool,
-
-    pub unrel_id: Option<u32>,
-    pub rel_id: Option<u32>,
+    pub rel_fragment_id: Option<u32>,
 }
 
 #[derive(Debug)]
