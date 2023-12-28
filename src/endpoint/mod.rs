@@ -6,6 +6,11 @@ mod cc;
 mod segment_rx;
 mod segment_tx;
 
+#[derive(Clone)]
+pub struct Config {
+    pub timeout_time_ms: u64,
+}
+
 // TODO: Use generic names like A, B
 #[derive(Clone, Copy, Debug)]
 pub enum TimerName {
@@ -238,6 +243,8 @@ pub enum StateId {
 }
 
 pub struct Endpoint {
+    config: Config,
+
     state_id: StateId,
 
     local_nonce: u32,
@@ -252,7 +259,6 @@ pub struct Endpoint {
     tx_buffer: [u8; 1478],
 
     rto_ms: u64,
-    timeout_time_ms: u64,
     rto_timer_state: Option<RtoTimerState>,
 
     rtt_state: Option<RttState>,
@@ -265,16 +271,16 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub fn new() -> Self {
+    pub fn new(config: Config) -> Self {
         let fragment_size = 1478;
         let fragment_window_size = 1024;
         let segment_window_size = 128;
-        let timeout_time_ms = 10_000;
 
         let local_nonce = 0;
         let remote_nonce = 0;
 
         Self {
+            config,
             state_id: StateId::PreInit,
             local_nonce,
             remote_nonce,
@@ -283,7 +289,6 @@ impl Endpoint {
             cc_state: cc::AimdReno::new(fragment_size),
             tx_buffer: [0; 1478],
             rto_ms: INITIAL_RTO_MS,
-            timeout_time_ms,
             rto_timer_state: None,
             rtt_state: None,
             rtt_timer_state: None,
@@ -626,7 +631,9 @@ impl Endpoint {
 
                     timer_state.rto_sum_ms += timer_state.rto_ms;
 
-                    if timer_state.rto_sum_ms >= self.timeout_time_ms {
+                    println!("RTO SUM MS: {}", timer_state.rto_sum_ms);
+
+                    if timer_state.rto_sum_ms >= self.config.timeout_time_ms {
                         // No acks received for longer than user-specified timeout
                         ctx.on_timeout();
 
@@ -919,7 +926,10 @@ mod tests {
     #[test]
     fn tx_state() {
         let mut host_ctx = MockHostContext::new();
-        let mut endpoint = Endpoint::new();
+        let config = Config {
+            timeout_time_ms: 10_000,
+        };
+        let mut endpoint = Endpoint::new(config);
 
         endpoint.flush_stream(true, true, 0, &mut host_ctx);
     }

@@ -9,6 +9,23 @@ use super::frame;
 use super::socket;
 use super::SendMode;
 
+const HANDSHAKE_RESEND_TIMEOUT_MS: u64 = 2000;
+
+#[derive(Clone)]
+pub struct Config {
+    pub handshake_timeout_ms: u64,
+    pub connection_timeout_ms: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            handshake_timeout_ms: 10_000,
+            connection_timeout_ms: 10_000,
+        }
+    }
+}
+
 type EndpointRc = Rc<RefCell<endpoint::Endpoint>>;
 
 enum HandshakePhase {
@@ -21,8 +38,8 @@ struct HandshakeState {
     timeout_time_ms: u64,
     timeout_ms: u64,
     packet_buffer: Vec<(Box<[u8]>, SendMode)>,
-    local_nonce: u32,
     frame: Box<[u8]>,
+    local_nonce: u32,
 }
 
 struct ActiveState {
@@ -56,6 +73,8 @@ struct EndpointContext<'a> {
 }
 
 struct ClientCore {
+    // Saved configuration
+    config: Config,
     // Timestamps are computed relative to this instant
     time_ref: time::Instant,
     // Socket send handle
@@ -74,9 +93,6 @@ pub struct Client {
     // Socket receive handle
     socket_rx: socket::ConnectedSocketRx,
 }
-
-const HANDSHAKE_RESEND_TIMEOUT_MS: u64 = 2000;
-const HANDSHAKE_TIMEOUT_MS: u64 = 10000;
 
 impl<'a> EndpointContext<'a> {
     fn new(client: &'a mut ClientCore) -> Self {
@@ -289,7 +305,11 @@ impl ClientCore {
                             let packet_buffer = std::mem::take(&mut state.packet_buffer);
 
                             // Create an endpoint now that we're connected
-                            let endpoint = endpoint::Endpoint::new();
+                            let endpoint_config = endpoint::Config {
+                                timeout_time_ms: self.config.connection_timeout_ms,
+                            };
+
+                            let endpoint = endpoint::Endpoint::new(endpoint_config);
                             let endpoint_rc = Rc::new(RefCell::new(endpoint));
 
                             // Switch to active state
@@ -443,12 +463,33 @@ impl ClientCore {
     }
 }
 
+fn validate_config(config: &Config) {
+    assert!(
+        config.handshake_timeout_ms >= 2_000,
+        "invalid client configuration: handshake_timeout_ms"
+    );
+    assert!(
+        config.connection_timeout_ms >= 2_000,
+        "invalid client configuration: connection_timeout_ms"
+    );
+}
+
 impl Client {
     pub fn connect<A>(server_addr: A) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
     {
+        Self::connect_with_config(server_addr, Default::default())
+    }
+
+    pub fn connect_with_config<A>(server_addr: A, config: Config) -> std::io::Result<Self>
+    where
+        A: net::ToSocketAddrs,
+    {
+        // Future configuration
         let frame_size_max: usize = 1478;
+
+        validate_config(&config);
 
         let bind_address = (std::net::Ipv4Addr::UNSPECIFIED, 0);
 
@@ -468,28 +509,32 @@ impl Client {
         println!("requesting phase α...");
         socket_tx.send(&handshake_frame);
 
-        Ok(Self {
-            core: ClientCore {
-                time_ref: time::Instant::now(),
-                socket_tx: socket_tx,
-                state: State::Handshake(HandshakeState {
-                    phase: HandshakePhase::Alpha,
-                    timeout_time_ms: HANDSHAKE_TIMEOUT_MS,
-                    timeout_ms: HANDSHAKE_TIMEOUT_MS,
-                    packet_buffer: Vec::new(),
-                    frame: handshake_frame,
-                    local_nonce,
-                }),
-                timers: Timers {
-                    rto_timer: Timer {
-                        timeout_ms: Some(HANDSHAKE_RESEND_TIMEOUT_MS),
-                    },
-                    recv_timer: Timer { timeout_ms: None },
-                },
-                events: VecDeque::new(),
+        let state = State::Handshake(HandshakeState {
+            phase: HandshakePhase::Alpha,
+            timeout_time_ms: config.handshake_timeout_ms,
+            timeout_ms: config.handshake_timeout_ms,
+            packet_buffer: Vec::new(),
+            frame: handshake_frame,
+            local_nonce,
+        });
+
+        let timers = Timers {
+            rto_timer: Timer {
+                timeout_ms: Some(HANDSHAKE_RESEND_TIMEOUT_MS),
             },
-            socket_rx,
-        })
+            recv_timer: Timer { timeout_ms: None },
+        };
+
+        let core = ClientCore {
+            config,
+            time_ref: time::Instant::now(),
+            socket_tx,
+            state,
+            timers,
+            events: VecDeque::new(),
+        };
+
+        Ok(Self { core, socket_rx })
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,

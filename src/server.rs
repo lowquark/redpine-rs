@@ -13,6 +13,21 @@ use super::socket;
 use super::timer_wheel;
 use super::SendMode;
 
+#[derive(Clone)]
+pub struct Config {
+    pub peer_count_max: usize,
+    pub connection_timeout_ms: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            peer_count_max: 32,
+            connection_timeout_ms: 10_000,
+        }
+    }
+}
+
 type PeerId = u32;
 
 struct PeerTimerData {
@@ -68,6 +83,8 @@ struct EndpointContext<'a> {
 }
 
 struct ServerCore {
+    // Saved configuration
+    config: Config,
     // Timestamps are computed relative to this instant
     time_ref: time::Instant,
     // Socket send handle
@@ -134,14 +151,19 @@ impl PeerTimers {
 }
 
 impl Peer {
-    fn new(id: PeerId, addr: net::SocketAddr, server_weak: ServerCoreWeak) -> Self {
+    fn new(
+        id: PeerId,
+        addr: net::SocketAddr,
+        endpoint_config: endpoint::Config,
+        server_weak: ServerCoreWeak,
+    ) -> Self {
         Self {
             core: PeerCore {
                 id,
                 addr,
                 timers: PeerTimers::new(),
             },
-            endpoint: endpoint::Endpoint::new(),
+            endpoint: endpoint::Endpoint::new(endpoint_config),
             server_weak,
         }
     }
@@ -167,6 +189,7 @@ impl PeerTable {
     pub fn insert(
         &mut self,
         addr: &net::SocketAddr,
+        endpoint_config: endpoint::Config,
         server_weak: &ServerCoreWeak,
     ) -> Option<PeerRc> {
         // Ensure a peer does not already exist at this address
@@ -174,7 +197,12 @@ impl PeerTable {
             // Allocate an ID (an empty stack means we have reached the peer limit)
             if let Some(new_id) = self.free_ids.pop() {
                 // Create new peer object
-                let peer = Peer::new(new_id, addr.clone(), Weak::clone(server_weak));
+                let peer = Peer::new(
+                    new_id,
+                    addr.clone(),
+                    endpoint_config,
+                    Weak::clone(server_weak),
+                );
                 let peer_rc = Rc::new(RefCell::new(peer));
 
                 // Associate with given address
@@ -429,7 +457,14 @@ impl ServerCore {
             if mac_valid && timestamp_valid && params_compatible {
                 // TODO: Handle the case where the peer table is full!
 
-                if let Some(peer_rc) = self.peer_table.insert(sender_addr, &self.self_weak) {
+                let endpoint_config = endpoint::Config {
+                    timeout_time_ms: self.config.connection_timeout_ms,
+                };
+
+                if let Some(peer_rc) =
+                    self.peer_table
+                        .insert(sender_addr, endpoint_config, &self.self_weak)
+                {
                     let now_ms = self.time_now_ms();
 
                     let ref mut peer = *peer_rc.borrow_mut();
@@ -546,16 +581,35 @@ impl ServerCore {
     }
 }
 
+fn validate_config(config: &Config) {
+    assert!(
+        config.peer_count_max > 0 && config.peer_count_max - 1 <= PeerId::max_value() as usize,
+        "invalid server configuration: peer_count_max"
+    );
+    assert!(
+        config.connection_timeout_ms >= 2_000,
+        "invalid server configuration: connection_timeout_ms"
+    );
+}
+
 impl Server {
     pub fn bind<A>(bind_addr: A) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
     {
-        let frame_size_max: usize = 1478;
-        let peer_count_max: usize = 8192;
+        Self::bind_with_config(bind_addr, Default::default())
+    }
 
-        assert!(peer_count_max > 0);
-        assert!(peer_count_max - 1 <= PeerId::max_value() as usize);
+    pub fn bind_with_config<A>(bind_addr: A, config: Config) -> std::io::Result<Self>
+    where
+        A: net::ToSocketAddrs,
+    {
+        // Future configuration
+        let frame_size_max: usize = 1478;
+
+        validate_config(&config);
+
+        let time_ref = time::Instant::now();
 
         let (socket_tx, socket_rx) = socket::new(bind_addr, frame_size_max)?;
 
@@ -566,18 +620,22 @@ impl Server {
             .try_into()
             .unwrap();
 
+        let peer_table = PeerTable::new(config.peer_count_max);
+        let timer_wheel = TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0);
+
         // In order to do interesting things with Peer objects, PeerHandles require Peers to keep a
-        // (weak) pointer to the ServerCore. The most convenient way to accomplish this is to give
-        // ServerCores a weak pointer which can be cloned upon Peer construction. The alternative
-        // is to pass pointers to the ServerCore down the frame handling call stack, which is
-        // cumbersome.
+        // (weak) pointer to the ServerCore object. The most convenient way to accomplish this is
+        // to give ServerCore a weak pointer to itself that can be cloned upon Peer construction.
+        // The alternative is to pass pointers to the ServerCore down the frame handling call
+        // stack, which is cumbersome.
         let core = Rc::new_cyclic(|self_weak| {
             RefCell::new(ServerCore {
-                time_ref: time::Instant::now(),
+                config,
+                time_ref,
                 socket_tx,
                 siphash_key,
-                peer_table: PeerTable::new(peer_count_max),
-                timer_wheel: TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0),
+                peer_table,
+                timer_wheel,
                 events: VecDeque::new(),
                 self_weak: Weak::clone(self_weak),
             })

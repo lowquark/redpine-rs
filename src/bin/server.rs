@@ -1,8 +1,13 @@
 static EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
 
 fn main() {
-    let mut ufl_server =
-        ufl::Server::bind(("127.0.0.1", 8888)).expect("failed to create ufl server");
+    let config = ufl::server::Config {
+        peer_count_max: 1,
+        connection_timeout_ms: 4_000,
+    };
+
+    let mut ufl_server = ufl::Server::bind_with_config(("127.0.0.1", 8888), config)
+        .expect("failed to create ufl server");
 
     loop {
         while let Some(event) = ufl_server.wait_event_timeout(EVENT_TIMEOUT) {
