@@ -158,10 +158,10 @@ The counter saturates at user-defined positive and negative values.
 */
 
 mod buffer;
-pub mod client;
+mod client;
 mod endpoint;
 mod frame;
-pub mod server;
+mod server;
 mod socket;
 mod timer_wheel;
 
@@ -171,4 +171,8 @@ pub enum SendMode {
 }
 
 pub type Client = client::Client;
+pub type ClientConfig = client::Config;
+pub type ClientEvent = client::Event;
 pub type Server = server::Server;
+pub type ServerConfig = server::Config;
+pub type ServerEvent = server::Event;

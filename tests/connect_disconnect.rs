@@ -13,25 +13,25 @@ fn run_server() {
     'outer: loop {
         while let Some(event) = server.wait_event_timeout(EVENT_TIMEOUT) {
             match event {
-                redpine::server::Event::Connect(_peer) => {
-                    println!("server::Event::Connect");
+                redpine::ServerEvent::Connect(_peer) => {
+                    println!("ServerEvent::Connect");
 
                     assert_eq!(x, 0);
                     x += 1;
                 }
-                redpine::server::Event::Disconnect(_peer) => {
-                    println!("server::Event::Disconnect");
+                redpine::ServerEvent::Disconnect(_peer) => {
+                    println!("ServerEvent::Disconnect");
 
                     assert_eq!(x, 1);
                     x += 1;
 
                     break 'outer;
                 }
-                redpine::server::Event::Receive(_, _) => {
-                    panic!("server::Event::Receive");
+                redpine::ServerEvent::Receive(_, _) => {
+                    panic!("ServerEvent::Receive");
                 }
-                redpine::server::Event::Timeout(_) => {
-                    panic!("server::Event::Timeout");
+                redpine::ServerEvent::Timeout(_) => {
+                    panic!("ServerEvent::Timeout");
                 }
             }
         }
@@ -41,35 +41,35 @@ fn run_server() {
 }
 
 fn run_client() {
-    let mut client = redpine::client::Client::connect(("127.0.0.1", 8888))
-        .expect("failed to create redpine client");
+    let mut client =
+        redpine::Client::connect(("127.0.0.1", 8888)).expect("failed to create redpine client");
 
     let mut x = 0;
 
     'outer: loop {
         while let Some(event) = client.wait_event_timeout(EVENT_TIMEOUT) {
             match event {
-                redpine::client::Event::Connect => {
-                    println!("client::Event::Connect");
+                redpine::ClientEvent::Connect => {
+                    println!("ClientEvent::Connect");
 
                     client.disconnect();
 
                     assert_eq!(x, 0);
                     x += 1;
                 }
-                redpine::client::Event::Disconnect => {
-                    println!("client::Event::Disconnect");
+                redpine::ClientEvent::Disconnect => {
+                    println!("ClientEvent::Disconnect");
 
                     assert_eq!(x, 1);
                     x += 1;
 
                     break 'outer;
                 }
-                redpine::client::Event::Receive(_) => {
-                    panic!("client::Event::Receive");
+                redpine::ClientEvent::Receive(_) => {
+                    panic!("ClientEvent::Receive");
                 }
-                redpine::client::Event::Timeout => {
-                    panic!("client::Event::Timeout");
+                redpine::ClientEvent::Timeout => {
+                    panic!("ClientEvent::Timeout");
                 }
             }
         }
