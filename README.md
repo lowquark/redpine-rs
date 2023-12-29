@@ -34,10 +34,6 @@ in the reliable queue are still under consideration.)
 
 # TODO
 
-  * Iron out resynchronization
-
-  * Implement server/client configuration
-
   * Implement handshake errors
 
   * Implement multi-client test
