@@ -13,6 +13,31 @@ use super::socket;
 use super::timer_wheel;
 use super::SendMode;
 
+const TIMER_WHEEL_CONFIG: [timer_wheel::ArrayConfig; 3] = [
+    timer_wheel::ArrayConfig {
+        size: 32,
+        ms_per_bin: 4,
+    },
+    timer_wheel::ArrayConfig {
+        size: 32,
+        ms_per_bin: 4 * 8,
+    },
+    timer_wheel::ArrayConfig {
+        size: 32,
+        ms_per_bin: 4 * 8 * 8,
+    },
+];
+
+const FRAME_SIZE_MAX: usize = 1478;
+
+const PEER_COUNT_MAX_DEFAULT: usize = 8;
+const PEER_COUNT_MAX_MAX: usize = 65536;
+
+const HANDSHAKE_TIMEOUT_MS: u32 = 10_000;
+
+const CONNECTION_TIMEOUT_DEFAULT_MS: u64 = 10_000;
+const CONNECTION_TIMEOUT_MIN_MS: u64 = 2_000;
+
 #[derive(Clone)]
 pub struct Config {
     pub peer_count_max: usize,
@@ -22,9 +47,28 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            peer_count_max: 32,
-            connection_timeout_ms: 10_000,
+            peer_count_max: PEER_COUNT_MAX_DEFAULT,
+            connection_timeout_ms: CONNECTION_TIMEOUT_DEFAULT_MS,
         }
+    }
+}
+
+impl Config {
+    fn validate(&self) {
+        assert!(
+            self.peer_count_max > 0,
+            "invalid server configuration: peer_count_max == 0"
+        );
+        assert!(
+            self.peer_count_max <= PEER_COUNT_MAX_MAX,
+            "invalid server configuration: peer_count_max > {}",
+            PEER_COUNT_MAX_MAX
+        );
+        assert!(
+            self.connection_timeout_ms >= CONNECTION_TIMEOUT_MIN_MS,
+            "invalid server configuration: connection_timeout_ms < {}",
+            CONNECTION_TIMEOUT_MIN_MS
+        );
     }
 }
 
@@ -116,23 +160,6 @@ pub struct Server {
 pub struct PeerHandle {
     peer: PeerRc,
 }
-
-const TIMER_WHEEL_ARRAY_CONFIG: [timer_wheel::ArrayConfig; 3] = [
-    timer_wheel::ArrayConfig {
-        size: 32,
-        ms_per_bin: 4,
-    },
-    timer_wheel::ArrayConfig {
-        size: 32,
-        ms_per_bin: 4 * 8,
-    },
-    timer_wheel::ArrayConfig {
-        size: 32,
-        ms_per_bin: 4 * 8 * 8,
-    },
-];
-
-const HANDSHAKE_TIMEOUT_MS: u32 = 10000;
 
 impl PeerTimers {
     fn new() -> Self {
@@ -581,17 +608,6 @@ impl ServerCore {
     }
 }
 
-fn validate_config(config: &Config) {
-    assert!(
-        config.peer_count_max > 0 && config.peer_count_max - 1 <= PeerId::max_value() as usize,
-        "invalid server configuration: peer_count_max"
-    );
-    assert!(
-        config.connection_timeout_ms >= 2_000,
-        "invalid server configuration: connection_timeout_ms"
-    );
-}
-
 impl Server {
     pub fn bind<A>(bind_addr: A) -> std::io::Result<Self>
     where
@@ -604,14 +620,11 @@ impl Server {
     where
         A: net::ToSocketAddrs,
     {
-        // Future configuration
-        let frame_size_max: usize = 1478;
-
-        validate_config(&config);
+        config.validate();
 
         let time_ref = time::Instant::now();
 
-        let (socket_tx, socket_rx) = socket::new(bind_addr, frame_size_max)?;
+        let (socket_tx, socket_rx) = socket::new(bind_addr, FRAME_SIZE_MAX)?;
 
         // XXX TODO: CSPRNG!
         let siphash_key = (0..16)
@@ -621,7 +634,7 @@ impl Server {
             .unwrap();
 
         let peer_table = PeerTable::new(config.peer_count_max);
-        let timer_wheel = TimerWheel::new(&TIMER_WHEEL_ARRAY_CONFIG, 0);
+        let timer_wheel = TimerWheel::new(&TIMER_WHEEL_CONFIG, 0);
 
         // In order to do interesting things with Peer objects, PeerHandles require Peers to keep a
         // (weak) pointer to the ServerCore object. The most convenient way to accomplish this is

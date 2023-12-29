@@ -9,7 +9,15 @@ use super::frame;
 use super::socket;
 use super::SendMode;
 
-const HANDSHAKE_RESEND_TIMEOUT_MS: u64 = 2000;
+const FRAME_SIZE_MAX: usize = 1478;
+
+const HANDSHAKE_TIMEOUT_DEFAULT_MS: u64 = 10_000;
+const HANDSHAKE_TIMEOUT_MIN_MS: u64 = 2_000;
+
+const HANDSHAKE_RESEND_TIMEOUT_MS: u64 = 2_000;
+
+const CONNECTION_TIMEOUT_DEFAULT_MS: u64 = 10_000;
+const CONNECTION_TIMEOUT_MIN_MS: u64 = 2_000;
 
 #[derive(Clone)]
 pub struct Config {
@@ -20,9 +28,24 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            handshake_timeout_ms: 10_000,
-            connection_timeout_ms: 10_000,
+            handshake_timeout_ms: HANDSHAKE_TIMEOUT_DEFAULT_MS,
+            connection_timeout_ms: CONNECTION_TIMEOUT_DEFAULT_MS,
         }
+    }
+}
+
+impl Config {
+    fn validate(&self) {
+        assert!(
+            self.handshake_timeout_ms >= HANDSHAKE_TIMEOUT_MIN_MS,
+            "invalid client configuration: handshake_timeout_ms < {}",
+            HANDSHAKE_TIMEOUT_MIN_MS
+        );
+        assert!(
+            self.connection_timeout_ms >= CONNECTION_TIMEOUT_MIN_MS,
+            "invalid client configuration: connection_timeout_ms < {}",
+            CONNECTION_TIMEOUT_MIN_MS
+        );
     }
 }
 
@@ -463,17 +486,6 @@ impl ClientCore {
     }
 }
 
-fn validate_config(config: &Config) {
-    assert!(
-        config.handshake_timeout_ms >= 2_000,
-        "invalid client configuration: handshake_timeout_ms"
-    );
-    assert!(
-        config.connection_timeout_ms >= 2_000,
-        "invalid client configuration: connection_timeout_ms"
-    );
-}
-
 impl Client {
     pub fn connect<A>(server_addr: A) -> std::io::Result<Self>
     where
@@ -486,15 +498,12 @@ impl Client {
     where
         A: net::ToSocketAddrs,
     {
-        // Future configuration
-        let frame_size_max: usize = 1478;
-
-        validate_config(&config);
+        config.validate();
 
         let bind_address = (std::net::Ipv4Addr::UNSPECIFIED, 0);
 
         let (mut socket_tx, socket_rx) =
-            socket::new_connected(bind_address, server_addr, frame_size_max)?;
+            socket::new_connected(bind_address, server_addr, FRAME_SIZE_MAX)?;
 
         let local_nonce = rand::random::<u32>();
 

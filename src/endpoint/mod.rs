@@ -6,12 +6,35 @@ mod cc;
 mod segment_rx;
 mod segment_tx;
 
+const CLOSE_RESEND_TIMEOUT_MS: u64 = 2_000;
+const DISCONNECT_TIMEOUT_MS: u64 = 10_000;
+
+const FRAME_SIZE_MAX: usize = 1478;
+const SEGMENT_WINDOW_SIZE: u32 = 4096;
+const FRAGMENT_SIZE: usize = 1024;
+const FRAGMENT_WINDOW_SIZE: u32 = 4096;
+
+const PRIO_RELIABLE_WEIGHT: u8 = 1;
+const PRIO_RELIABLE_SATURATION: i32 = 10_000;
+const PRIO_UNRELIABLE_WEIGHT: u8 = 1;
+const PRIO_UNRELIABLE_SATURATION: i32 = 10_000;
+const PRIO_SATURATION_MAX: i32 = 1_000_000;
+
+const RTO_INITIAL_MS: u64 = 1_000;
+const RTO_MAX_MS: u64 = 60_000;
+const RTO_MIN_MS: u64 = 1_000;
+
+const ALPHA: f32 = 0.125;
+const BETA: f32 = 0.25;
+const G_MS: f32 = 4.0;
+const K: f32 = 4.0;
+
 #[derive(Clone)]
 pub struct Config {
     pub timeout_time_ms: u64,
 }
 
-// TODO: Use generic names like A, B
+// TODO: Rto timer is unneeded, remove names altogether
 #[derive(Clone, Copy, Debug)]
 pub enum TimerName {
     // Resend time out (no ack from remote)
@@ -46,8 +69,6 @@ pub trait HostContext {
     fn on_timeout(&mut self);
 }
 
-const SATURATION_MAX: i32 = 1_000_000;
-
 struct TxPrioState {
     counter: i32,
     w_r: u8,
@@ -67,8 +88,8 @@ impl TxPrioState {
         assert!(w_r != 0);
         assert!(w_u != 0);
 
-        assert!(sat_r > 0 && sat_r <= SATURATION_MAX);
-        assert!(sat_u > 0 && sat_u <= SATURATION_MAX);
+        assert!(sat_r > 0 && sat_r <= PRIO_SATURATION_MAX);
+        assert!(sat_u > 0 && sat_u <= PRIO_SATURATION_MAX);
 
         Self {
             counter: 0,
@@ -119,7 +140,12 @@ impl FragmentTxBuffers {
         Self {
             unrel: buffer::UnreliableTxBuffer::new(window_base_id, fragment_size),
             rel: buffer::ReliableTxBuffer::new(window_base_id, fragment_size, window_size),
-            prio_state: TxPrioState::new(1, 2, 10_000, 20_000),
+            prio_state: TxPrioState::new(
+                PRIO_RELIABLE_WEIGHT,
+                PRIO_UNRELIABLE_WEIGHT,
+                PRIO_RELIABLE_SATURATION,
+                PRIO_UNRELIABLE_SATURATION,
+            ),
         }
     }
 
@@ -205,18 +231,6 @@ impl FragmentTxBuffers {
     }
 }
 
-const INITIAL_RTO_MS: u64 = 1000;
-const RTO_MAX_MS: u64 = 60000;
-const RTO_MIN_MS: u64 = 1000;
-
-const CLOSE_RESEND_TIMEOUT_MS: u64 = 2000;
-const DISCONNECT_TIMEOUT_MS: u64 = 10000;
-
-const ALPHA: f32 = 0.125;
-const BETA: f32 = 0.25;
-const G_MS: f32 = 4.0;
-const K: f32 = 4.0;
-
 struct RttState {
     srtt_ms: f32,
     rttvar_ms: f32,
@@ -256,7 +270,7 @@ pub struct Endpoint {
 
     cc_state: cc::AimdReno,
 
-    tx_buffer: [u8; 1478],
+    tx_buffer: Box<[u8]>,
 
     rto_ms: u64,
     rto_timer_state: Option<RtoTimerState>,
@@ -272,10 +286,6 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn new(config: Config) -> Self {
-        let fragment_size = 1478;
-        let fragment_window_size = 1024;
-        let segment_window_size = 128;
-
         let local_nonce = 0;
         let remote_nonce = 0;
 
@@ -284,17 +294,17 @@ impl Endpoint {
             state_id: StateId::PreInit,
             local_nonce,
             remote_nonce,
-            segment_tx: segment_tx::SegmentTx::new(0, segment_window_size),
-            fragment_tx: FragmentTxBuffers::new(0, fragment_window_size, fragment_size),
-            cc_state: cc::AimdReno::new(fragment_size),
-            tx_buffer: [0; 1478],
-            rto_ms: INITIAL_RTO_MS,
+            segment_tx: segment_tx::SegmentTx::new(0, SEGMENT_WINDOW_SIZE),
+            fragment_tx: FragmentTxBuffers::new(0, FRAGMENT_WINDOW_SIZE, FRAGMENT_SIZE),
+            cc_state: cc::AimdReno::new(FRAGMENT_SIZE),
+            tx_buffer: vec![0; FRAME_SIZE_MAX].into_boxed_slice(),
+            rto_ms: RTO_INITIAL_MS,
             rto_timer_state: None,
             rtt_state: None,
             rtt_timer_state: None,
-            segment_rx: segment_rx::SegmentRx::new(0, segment_window_size, fragment_size),
-            unreliable_rx: buffer::UnreliableRxBuffer::new(0, fragment_size),
-            reliable_rx: buffer::ReliableRxBuffer::new(0, fragment_size),
+            segment_rx: segment_rx::SegmentRx::new(0, SEGMENT_WINDOW_SIZE, FRAGMENT_SIZE),
+            unreliable_rx: buffer::UnreliableRxBuffer::new(0, FRAGMENT_SIZE),
+            reliable_rx: buffer::ReliableRxBuffer::new(0, FRAGMENT_SIZE),
         }
     }
 
