@@ -11,7 +11,7 @@ pub const FRAME_OVERHEAD_SIZE: usize = FRAME_HEADER_SIZE + FRAME_CRC_SIZE;
 pub const HANDSHAKE_ALPHA_SIZE: usize = 6;
 pub const HANDSHAKE_ALPHA_ACK_SIZE: usize = 28;
 pub const HANDSHAKE_BETA_SIZE: usize = 28;
-pub const HANDSHAKE_BETA_ACK_SIZE: usize = 4;
+pub const HANDSHAKE_BETA_ACK_SIZE: usize = 5;
 pub const CLOSE_SIZE: usize = 4;
 pub const CLOSE_ACK_SIZE: usize = 4;
 pub const STREAM_SEGMENT_HEADER_SIZE: usize = 5;
@@ -301,12 +301,29 @@ impl BlockSerial for HandshakeBetaAckFrame {
     const SIZE: usize = HANDSHAKE_BETA_ACK_SIZE;
 
     unsafe fn read(rd: &mut Reader) -> Self {
+        let status = rd.read_u8();
         let client_nonce = rd.read_u32();
 
-        Self { client_nonce }
+        let error = match status {
+            0x00 => None,
+            0x01 => Some(HandshakeErrorKind::Capacity),
+            0x02 | _ => Some(HandshakeErrorKind::Parameter),
+        };
+
+        Self {
+            error,
+            client_nonce,
+        }
     }
 
     unsafe fn write(wr: &mut Writer, obj: &Self) {
+        let status = match obj.error {
+            None => 0x00,
+            Some(HandshakeErrorKind::Capacity) => 0x01,
+            Some(HandshakeErrorKind::Parameter) => 0x02,
+        };
+
+        wr.write_u8(status);
         wr.write_u32(obj.client_nonce);
     }
 }

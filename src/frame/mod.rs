@@ -21,6 +21,12 @@ pub struct ConnectionParams {
 }
 
 #[derive(Debug)]
+pub enum HandshakeErrorKind {
+    Capacity,
+    Parameter,
+}
+
+#[derive(Debug)]
 pub struct Datagram<'a> {
     pub id: u32,
     pub unrel: bool,
@@ -58,6 +64,8 @@ pub struct HandshakeBetaFrame {
 
 #[derive(Debug)]
 pub struct HandshakeBetaAckFrame {
+    pub error: Option<HandshakeErrorKind>,
+
     pub client_nonce: u32,
 }
 

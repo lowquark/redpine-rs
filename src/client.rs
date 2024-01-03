@@ -5,9 +5,9 @@ use std::rc::Rc;
 use std::time;
 
 use super::endpoint;
-use super::ErrorKind;
 use super::frame;
 use super::socket;
+use super::ErrorKind;
 use super::SendMode;
 
 const FRAME_SIZE_MAX: usize = 1478;
@@ -169,7 +169,9 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     }
 
     fn on_timeout(&mut self) {
-        self.client.events.push_back(Event::Error(ErrorKind::Timeout));
+        self.client
+            .events
+            .push_back(Event::Error(ErrorKind::Timeout));
     }
 }
 

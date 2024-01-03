@@ -26,19 +26,17 @@ fn main() {
                 redpine::ClientEvent::Receive(packet_bytes) => {
                     println!("ClientEvent::Receive {packet_bytes:02X?}");
                 }
-                redpine::ClientEvent::Error(kind) => {
-                    match kind {
-                        redpine::ErrorKind::Timeout => {
-                            println!("ClientEvent::Error(redpine::ErrorKind::Timeout)");
-                        }
-                        redpine::ErrorKind::Capacity => {
-                            println!("ClientEvent::Error(redpine::ErrorKind::Capacity)");
-                        }
-                        redpine::ErrorKind::Parameter => {
-                            println!("ClientEvent::Error(redpine::ErrorKind::Parameter)");
-                        }
+                redpine::ClientEvent::Error(kind) => match kind {
+                    redpine::ErrorKind::Timeout => {
+                        println!("ClientEvent::Error(redpine::ErrorKind::Timeout)");
                     }
-                }
+                    redpine::ErrorKind::Capacity => {
+                        println!("ClientEvent::Error(redpine::ErrorKind::Capacity)");
+                    }
+                    redpine::ErrorKind::Parameter => {
+                        println!("ClientEvent::Error(redpine::ErrorKind::Parameter)");
+                    }
+                },
             }
         }
 

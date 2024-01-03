@@ -8,10 +8,10 @@ use std::time;
 use siphasher::sip;
 
 use super::endpoint;
-use super::ErrorKind;
 use super::frame;
 use super::socket;
 use super::timer_wheel;
+use super::ErrorKind;
 use super::SendMode;
 
 const TIMER_WHEEL_CONFIG: [timer_wheel::ArrayConfig; 3] = [
@@ -513,6 +513,7 @@ impl ServerCore {
                 // Always send an ack in case a previous ack was dropped.
                 let ref ack_frame = frame::HandshakeBetaAckFrame {
                     client_nonce: frame.client_nonce,
+                    error: None,
                 };
 
                 use frame::serial::SimpleFrame;
