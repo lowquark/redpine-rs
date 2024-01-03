@@ -24,8 +24,18 @@ fn main() {
                     peer.send(packet_bytes, redpine::SendMode::Unreliable(0));
                     peer.flush();
                 }
-                redpine::ServerEvent::Timeout(_peer) => {
-                    println!("ServerEvent::Timeout");
+                redpine::ServerEvent::Error(_peer, kind) => {
+                    match kind {
+                        redpine::ErrorKind::Timeout => {
+                            println!("ServerEvent::Error(redpine::ErrorKind::Timeout)");
+                        }
+                        redpine::ErrorKind::Capacity => {
+                            println!("ServerEvent::Error(redpine::ErrorKind::Capacity)");
+                        }
+                        redpine::ErrorKind::Parameter => {
+                            println!("ServerEvent::Error(redpine::ErrorKind::Parameter)");
+                        }
+                    }
                 }
             }
         }

@@ -30,8 +30,8 @@ fn run_server() {
                 redpine::ServerEvent::Receive(_, _) => {
                     panic!("ServerEvent::Receive");
                 }
-                redpine::ServerEvent::Timeout(_) => {
-                    panic!("ServerEvent::Timeout");
+                redpine::ServerEvent::Error(_, _) => {
+                    panic!("ServerEvent::Error");
                 }
             }
         }
@@ -68,8 +68,8 @@ fn run_client() {
                 redpine::ClientEvent::Receive(_) => {
                     panic!("ClientEvent::Receive");
                 }
-                redpine::ClientEvent::Timeout => {
-                    panic!("ClientEvent::Timeout");
+                redpine::ClientEvent::Error(_) => {
+                    panic!("ClientEvent::Error");
                 }
             }
         }

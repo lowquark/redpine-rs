@@ -170,6 +170,12 @@ pub enum SendMode {
     Unreliable(u16),
 }
 
+pub enum ErrorKind {
+    Timeout,
+    Capacity,
+    Parameter,
+}
+
 pub type Client = client::Client;
 pub type ClientConfig = client::Config;
 pub type ClientEvent = client::Event;

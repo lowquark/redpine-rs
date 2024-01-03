@@ -8,6 +8,7 @@ use std::time;
 use siphasher::sip;
 
 use super::endpoint;
+use super::ErrorKind;
 use super::frame;
 use super::socket;
 use super::timer_wheel;
@@ -117,7 +118,7 @@ pub enum Event {
     Connect(PeerHandle),
     Disconnect(PeerHandle),
     Receive(PeerHandle, Box<[u8]>),
-    Timeout(PeerHandle),
+    Error(PeerHandle, ErrorKind),
 }
 
 struct EndpointContext<'a> {
@@ -317,7 +318,7 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
 
     fn on_timeout(&mut self) {
         let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
-        let event = Event::Timeout(handle);
+        let event = Event::Error(handle, ErrorKind::Timeout);
         self.server.events.push_back(event);
     }
 }

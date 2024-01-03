@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::time;
 
 use super::endpoint;
+use super::ErrorKind;
 use super::frame;
 use super::socket;
 use super::SendMode;
@@ -88,7 +89,7 @@ pub enum Event {
     Connect,
     Disconnect,
     Receive(Box<[u8]>),
-    Timeout,
+    Error(ErrorKind),
 }
 
 struct EndpointContext<'a> {
@@ -168,7 +169,7 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     }
 
     fn on_timeout(&mut self) {
-        self.client.events.push_back(Event::Timeout);
+        self.client.events.push_back(Event::Error(ErrorKind::Timeout));
     }
 }
 
@@ -214,7 +215,7 @@ impl ClientCore {
                     endpoint::TimerName::Rto => {
                         if now_ms >= state.timeout_time_ms {
                             // Connection failed
-                            self.events.push_back(Event::Timeout);
+                            self.events.push_back(Event::Error(ErrorKind::Timeout));
                             self.state = State::Quiescent;
                         } else {
                             self.timers.rto_timer.timeout_ms =
