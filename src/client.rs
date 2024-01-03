@@ -323,35 +323,50 @@ impl ClientCore {
                 HandshakePhase::Beta => {
                     if let Some(frame) = frame::HandshakeBetaAckFrame::read(payload_bytes) {
                         if frame.client_nonce == state.local_nonce {
-                            // Reset any previous timers
-                            self.timers.rto_timer.timeout_ms = None;
-                            self.timers.recv_timer.timeout_ms = None;
+                            match frame.error {
+                                None => {
+                                    // Reset any previous timers
+                                    self.timers.rto_timer.timeout_ms = None;
+                                    self.timers.recv_timer.timeout_ms = None;
 
-                            // Keep queued up packets to be sent later
-                            let packet_buffer = std::mem::take(&mut state.packet_buffer);
+                                    // Keep queued up packets to be sent later
+                                    let packet_buffer = std::mem::take(&mut state.packet_buffer);
 
-                            // Create an endpoint now that we're connected
-                            let endpoint_config = endpoint::Config {
-                                timeout_time_ms: self.config.connection_timeout_ms,
-                            };
+                                    // Create an endpoint now that we're connected
+                                    let endpoint_config = endpoint::Config {
+                                        timeout_time_ms: self.config.connection_timeout_ms,
+                                    };
 
-                            let endpoint = endpoint::Endpoint::new(endpoint_config);
-                            let endpoint_rc = Rc::new(RefCell::new(endpoint));
+                                    let endpoint = endpoint::Endpoint::new(endpoint_config);
+                                    let endpoint_rc = Rc::new(RefCell::new(endpoint));
 
-                            // Switch to active state
-                            self.state = State::Active(ActiveState {
-                                endpoint_rc: Rc::clone(&endpoint_rc),
-                            });
+                                    // Switch to active state
+                                    self.state = State::Active(ActiveState {
+                                        endpoint_rc: Rc::clone(&endpoint_rc),
+                                    });
 
-                            // Initialize endpoint
-                            let mut endpoint = endpoint_rc.borrow_mut();
+                                    // Initialize endpoint
+                                    let mut endpoint = endpoint_rc.borrow_mut();
 
-                            let ref mut host_ctx = EndpointContext::new(self);
+                                    let ref mut host_ctx = EndpointContext::new(self);
 
-                            endpoint.init(now_ms, host_ctx);
+                                    endpoint.init(now_ms, host_ctx);
 
-                            for (packet, mode) in packet_buffer.into_iter() {
-                                endpoint.send(packet, mode, now_ms, host_ctx);
+                                    for (packet, mode) in packet_buffer.into_iter() {
+                                        endpoint.send(packet, mode, now_ms, host_ctx);
+                                    }
+                                }
+                                Some(kind) => {
+                                    // Connection failed
+                                    let kind = match kind {
+                                        frame::HandshakeErrorKind::Capacity => ErrorKind::Capacity,
+                                        frame::HandshakeErrorKind::Parameter => {
+                                            ErrorKind::Parameter
+                                        }
+                                    };
+                                    self.events.push_back(Event::Error(kind));
+                                    self.state = State::Quiescent;
+                                }
                             }
                         }
                     }

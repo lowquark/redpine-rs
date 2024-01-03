@@ -214,34 +214,40 @@ impl PeerTable {
         self.peers.get(addr).map(|entry| &entry.1)
     }
 
+    pub fn is_full(&self) -> bool {
+        self.free_ids.len() == 0
+    }
+
+    pub fn contains(&self, addr: &net::SocketAddr) -> bool {
+        self.peers.contains_key(addr)
+    }
+
     pub fn insert(
         &mut self,
         addr: &net::SocketAddr,
         endpoint_config: endpoint::Config,
         server_weak: &ServerCoreWeak,
-    ) -> Option<PeerRc> {
-        // Ensure a peer does not already exist at this address
-        if !self.peers.contains_key(addr) {
-            // Allocate an ID (an empty stack means we have reached the peer limit)
-            if let Some(new_id) = self.free_ids.pop() {
-                // Create new peer object
-                let peer = Peer::new(
-                    new_id,
-                    addr.clone(),
-                    endpoint_config,
-                    Weak::clone(server_weak),
-                );
-                let peer_rc = Rc::new(RefCell::new(peer));
+    ) -> PeerRc {
+        // A peer may not already exist at this address
+        debug_assert!(!self.peers.contains_key(addr));
 
-                // Associate with given address
-                self.peers
-                    .insert(addr.clone(), (new_id, Rc::clone(&peer_rc)));
+        // Allocate an ID (an empty stack means we have reached the peer limit)
+        let new_id = self.free_ids.pop().unwrap();
 
-                return Some(peer_rc);
-            }
-        }
+        // Create new peer object
+        let peer = Peer::new(
+            new_id,
+            addr.clone(),
+            endpoint_config,
+            Weak::clone(server_weak),
+        );
+        let peer_rc = Rc::new(RefCell::new(peer));
 
-        return None;
+        // Associate with given address
+        self.peers
+            .insert(addr.clone(), (new_id, Rc::clone(&peer_rc)));
+
+        return peer_rc;
     }
 
     pub fn remove(&mut self, addr: &net::SocketAddr) {
@@ -482,17 +488,22 @@ impl ServerCore {
             let params_compatible =
                 connection_params_compatible(&frame.client_params, &server_params);
 
-            if mac_valid && timestamp_valid && params_compatible {
-                // TODO: Handle the case where the peer table is full!
+            if mac_valid && timestamp_valid {
+                let error = if self.peer_table.contains(sender_addr) {
+                    None
+                } else if self.peer_table.is_full() {
+                    Some(frame::HandshakeErrorKind::Capacity)
+                } else if !params_compatible {
+                    Some(frame::HandshakeErrorKind::Parameter)
+                } else {
+                    let endpoint_config = endpoint::Config {
+                        timeout_time_ms: self.config.connection_timeout_ms,
+                    };
 
-                let endpoint_config = endpoint::Config {
-                    timeout_time_ms: self.config.connection_timeout_ms,
-                };
+                    let peer_rc =
+                        self.peer_table
+                            .insert(sender_addr, endpoint_config, &self.self_weak);
 
-                if let Some(peer_rc) =
-                    self.peer_table
-                        .insert(sender_addr, endpoint_config, &self.self_weak)
-                {
                     let now_ms = self.time_now_ms();
 
                     let ref mut peer = *peer_rc.borrow_mut();
@@ -508,12 +519,14 @@ impl ServerCore {
                         "created peer {}, for sender address {:?}",
                         peer_core.id, sender_addr
                     );
-                }
+
+                    None
+                };
 
                 // Always send an ack in case a previous ack was dropped.
                 let ref ack_frame = frame::HandshakeBetaAckFrame {
                     client_nonce: frame.client_nonce,
-                    error: None,
+                    error,
                 };
 
                 use frame::serial::SimpleFrame;
