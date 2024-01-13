@@ -446,22 +446,6 @@ mod tests {
         },
     ];
 
-    struct TestTimerState {
-        id: usize,
-        timeout_time_ms: u64,
-        expired_ids: Rc<RefCell<Vec<usize>>>,
-    }
-
-    impl TestTimerState {
-        fn new(id: usize, timeout_time_ms: u64, expired_ids: Rc<RefCell<Vec<usize>>>) -> Self {
-            Self {
-                id,
-                timeout_time_ms,
-                expired_ids,
-            }
-        }
-    }
-
     fn compute_expiration_time_ms(last_update_ms: u64, timeout_time_ms: u64) -> u64 {
         assert!(last_update_ms <= timeout_time_ms);
         assert!(TEST_ARRAY_CONFIG.len() == 3);
@@ -488,7 +472,6 @@ mod tests {
     }
 
     struct TimerState {
-        timeout_time_ms: u64,
         expire_time_ms: u64,
         id: Option<TimerId>,
     }
@@ -501,9 +484,8 @@ mod tests {
     }
 
     impl TimerState {
-        fn new(timeout_time_ms: u64, expire_time_ms: u64) -> Self {
+        fn new(expire_time_ms: u64) -> Self {
             Self {
-                timeout_time_ms,
                 expire_time_ms,
                 id: None,
             }
@@ -511,13 +493,6 @@ mod tests {
     }
 
     impl TestHarness {
-        fn handler(
-            wheel: &mut TimerWheel<Rc<RefCell<TimerState>>>,
-            time_now_ms: u64,
-            state: Rc<RefCell<TimerState>>,
-        ) {
-        }
-
         fn new() -> Self {
             let wheel = TimerWheel::new(&TEST_ARRAY_CONFIG, 0);
 
@@ -547,7 +522,6 @@ mod tests {
                     compute_expiration_time_ms(self.last_step_time_ms, timeout_time_ms);
 
                 let timer_data = Rc::new(RefCell::new(TimerState::new(
-                    timeout_time_ms,
                     expire_time_ms,
                 )));
 
@@ -568,8 +542,6 @@ mod tests {
                 let mut timer = self.timers[data_idx].borrow_mut();
 
                 if let Some(id) = timer.id.take() {
-                    let timer_idx = id.idx;
-
                     self.wheel.unset_timer(id);
                 }
             }
@@ -709,7 +681,7 @@ mod tests {
 
         let count_rc = Rc::new(RefCell::new(0));
 
-        let timer_id = wheel.set_timer(0, Rc::clone(&count_rc));
+        wheel.set_timer(0, Rc::clone(&count_rc));
 
         for step_idx in 0..STEP_COUNT {
             let time_now_ms = (step_idx + 1) * MIN_RESOLUTION_MS;
@@ -801,7 +773,7 @@ mod tests {
             let mut expired_data = Vec::new();
 
             // Advance to a random time
-            let mut step_time_ms = rand::random::<u64>() / 2;
+            let step_time_ms = rand::random::<u64>() / 2;
 
             wheel.step(step_time_ms, &mut expired_data);
 
@@ -811,8 +783,6 @@ mod tests {
                 .collect::<Vec<_>>();
 
             for &timeout_time_ms in timeout_times.iter() {
-                let expire_time_ms = compute_expiration_time_ms(step_time_ms, timeout_time_ms);
-
                 wheel.set_timer(timeout_time_ms, ());
             }
 

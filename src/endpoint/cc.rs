@@ -109,8 +109,6 @@ impl AimdReno {
 mod tests {
     use super::*;
 
-    const INITIAL_CWND_MSS: usize = super::INITIAL_CWND_MSS as usize;
-
     fn assert_cwnd_near(cwnd: usize, expected: f64) {
         let cwnd_f64 = cwnd as f64;
 
@@ -128,7 +126,7 @@ mod tests {
         let mut expected_cwnd = 1000.0;
         assert_cwnd_near(cc.cwnd(), expected_cwnd);
 
-        for i in 0..30 {
+        for _ in 0..30 {
             cc.handle_ack();
             expected_cwnd += 100.0;
             assert_cwnd_near(cc.cwnd(), expected_cwnd);
@@ -141,7 +139,7 @@ mod tests {
         cc.handle_drop();
         assert_cwnd_near(cc.cwnd(), expected_cwnd);
 
-        for i in 0..30 {
+        for _ in 0..30 {
             cc.handle_ack();
             expected_cwnd += mss_f64 * mss_f64 / expected_cwnd;
             assert_cwnd_near(cc.cwnd(), expected_cwnd);

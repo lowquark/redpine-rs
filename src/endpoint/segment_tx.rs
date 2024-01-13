@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(tx.acknowledge(3, 0b111, checksum_0_2), false);
 
         // Fill window again
-        for i in 0..3 {
+        for _ in 0..3 {
             tx.compute_next_nonce();
             tx.mark_sent(0);
         }

@@ -231,44 +231,6 @@ mod tests {
         return pop_result;
     }
 
-    fn push_basic(send_buf: &mut TxBuffer, id: u32) {
-        let packet_data: Box<[u8]> = vec![
-            (id >> 24) as u8,
-            (id >> 16) as u8,
-            (id >> 8) as u8,
-            id as u8,
-        ]
-        .into();
-
-        send_buf.push(packet_data, u64::max_value());
-    }
-
-    fn expect_pop_basic(send_buf: &mut TxBuffer, id: u32) {
-        let packet_data = Rc::new(
-            vec![
-                (id >> 24) as u8,
-                (id >> 16) as u8,
-                (id >> 8) as u8,
-                id as u8,
-            ]
-            .into_boxed_slice(),
-        );
-
-        let (fragment_id, fragment) = peek_and_pop_sendable(send_buf).unwrap();
-
-        assert_eq!(fragment_id, id);
-
-        assert_eq!(
-            fragment,
-            FragmentRc {
-                first: true,
-                last: true,
-                data: packet_data,
-                data_range: 0..4,
-            }
-        );
-    }
-
     fn expect_pop_fail(send_buf: &mut TxBuffer) {
         assert_eq!(peek_and_pop_sendable(send_buf), None);
     }
