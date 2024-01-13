@@ -34,15 +34,15 @@ in the reliable queue are still under consideration.)
 
 # TODO
 
-  * Implement handshake errors
-
-  * Implement multi-client test
-
   * Pad initial frame to MTU
 
   * Use CSPRNG when initializing SipHash key
 
   * Implement Nagle's algorithm
+
+  * Remove unused receive timer
+
+  * Figure out data-limited congestion-avoidance
 
   * ???
 
