@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::fmt;
 use std::net;
 use std::rc::{Rc, Weak};
 use std::time;
@@ -114,6 +115,7 @@ struct PeerTable {
 
 type TimerWheel = timer_wheel::TimerWheel<PeerTimerData>;
 
+#[derive(Debug)]
 pub enum Event {
     Connect(PeerHandle),
     Disconnect(PeerHandle),
@@ -452,7 +454,7 @@ impl ServerCore {
                 let ref mut buffer = [0u8; frame::HandshakeAlphaAckFrame::FRAME_SIZE];
                 let ack_frame_bytes = ack_frame.write(buffer);
 
-                println!("acking phase α...");
+                // println!("acking phase α...");
                 self.socket_tx.send(&ack_frame_bytes, sender_addr);
             }
         }
@@ -515,10 +517,12 @@ impl ServerCore {
 
                     endpoint.init(now_ms, ctx);
 
+                    /*
                     println!(
                         "created peer {}, for sender address {:?}",
                         peer_core.id, sender_addr
                     );
+                    */
 
                     None
                 };
@@ -535,7 +539,7 @@ impl ServerCore {
                 let ref mut buffer = [0u8; frame::HandshakeBetaAckFrame::FRAME_SIZE];
                 let ack_frame_bytes = ack_frame.write(buffer);
 
-                println!("acking phase β...");
+                // println!("acking phase β...");
                 self.socket_tx.send(&ack_frame_bytes, sender_addr);
             }
         }
@@ -815,5 +819,13 @@ impl PeerHandle {
 
     pub fn id(&self) -> PeerId {
         self.peer.borrow().core.id
+    }
+}
+
+impl std::fmt::Debug for PeerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PeerHandle")
+            .field("id", &self.id())
+            .finish()
     }
 }

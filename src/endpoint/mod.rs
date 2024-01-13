@@ -302,7 +302,7 @@ impl Endpoint {
             rto_timer_state: None,
             rtt_state: None,
             rtt_timer_state: None,
-            segment_rx: segment_rx::SegmentRx::new(0, SEGMENT_WINDOW_SIZE, FRAGMENT_SIZE),
+            segment_rx: segment_rx::SegmentRx::new(0, SEGMENT_WINDOW_SIZE, FRAME_SIZE_MAX),
             unreliable_rx: buffer::UnreliableRxBuffer::new(0, FRAGMENT_SIZE),
             reliable_rx: buffer::ReliableRxBuffer::new(0, FRAGMENT_SIZE),
         }
@@ -350,8 +350,8 @@ impl Endpoint {
 
                 let ref mut rtt_state = self.rtt_state.as_mut().unwrap();
 
-                println!("RTTVAR: {}", rtt_state.rttvar_ms);
-                println!("SRTT: {}", rtt_state.srtt_ms);
+                // println!("RTTVAR: {}", rtt_state.rttvar_ms);
+                // println!("SRTT: {}", rtt_state.srtt_ms);
 
                 self.rto_ms = (rtt_state.srtt_ms + G_MS.max(K * rtt_state.rttvar_ms)).ceil() as u64;
 
@@ -407,10 +407,12 @@ impl Endpoint {
 
         if read_ack {
             if let Some(ack) = frame_reader.read::<frame::StreamAck>() {
+                /*
                 println!(
                     "RECEIVE ACK {}, {:05b}, {}",
                     ack.segment_id, ack.segment_history, ack.segment_checksum
                 );
+                */
 
                 // TODO: Only signal when new data has been acknowledged
                 self.cc_state.handle_ack();
@@ -420,7 +422,7 @@ impl Endpoint {
                     ack.segment_history.into(),
                     ack.segment_checksum,
                 ) {
-                    println!("DROP DETECTED");
+                    // println!("DROP DETECTED");
                     self.cc_state.handle_drop();
                 }
 
@@ -440,7 +442,7 @@ impl Endpoint {
                 let segment_nonce = segment_header.nonce;
                 let segment_bytes = frame_reader.remaining_bytes();
 
-                println!("RECEIVE SEGMENT {} {}", segment_id, segment_nonce);
+                // println!("RECEIVE SEGMENT {} {}", segment_id, segment_nonce);
 
                 self.segment_rx.receive(
                     segment_id,
@@ -632,7 +634,7 @@ impl Endpoint {
         match self.state_id {
             StateId::Active => match timer {
                 TimerName::Rto => {
-                    println!("STREAM RESEND TIMEOUT");
+                    // println!("STREAM RESEND TIMEOUT");
 
                     let ref mut timer_state = self
                         .rto_timer_state
@@ -641,7 +643,7 @@ impl Endpoint {
 
                     timer_state.rto_sum_ms += timer_state.rto_ms;
 
-                    println!("RTO SUM MS: {}", timer_state.rto_sum_ms);
+                    // println!("RTO SUM MS: {}", timer_state.rto_sum_ms);
 
                     if timer_state.rto_sum_ms >= self.config.timeout_time_ms {
                         // No acks received for longer than user-specified timeout
@@ -672,20 +674,20 @@ impl Endpoint {
                     }
                 }
                 TimerName::Receive => {
-                    println!("STREAM RECEIVE FLUSH TIMEOUT");
+                    // println!("STREAM RECEIVE FLUSH TIMEOUT");
                 }
             },
             StateId::Closing => match timer {
                 TimerName::Rto => {
                     // No ack received within resend timeout
-                    println!("CLOSING TIMEOUT");
+                    // println!("CLOSING TIMEOUT");
                     self.send_close_frame(ctx);
 
                     ctx.set_timer(TimerName::Rto, now_ms + CLOSE_RESEND_TIMEOUT_MS);
                 }
                 TimerName::Receive => {
                     // Disconnection timed out entirely
-                    println!("CLOSING FINAL TIMEOUT");
+                    // println!("CLOSING FINAL TIMEOUT");
                     self.state_id = StateId::Zombie;
                     ctx.on_timeout();
 
@@ -696,7 +698,7 @@ impl Endpoint {
                 TimerName::Rto => (),
                 TimerName::Receive => {
                     // Finished acking resent close requests and/or soaking up stray packets
-                    println!("FIN");
+                    // println!("FIN");
                     self.state_id = StateId::Zombie;
 
                     ctx.destroy_self();
@@ -754,10 +756,12 @@ impl Endpoint {
                     let segment_id = self.segment_rx.next_expected_id();
                     let (segment_history, segment_checksum) = self.segment_rx.next_ack_info();
 
+                    /*
                     println!(
                         "SEND ACK {}, {:05b}, {}",
                         segment_id, segment_history, segment_checksum
                     );
+                    */
 
                     let rel_fragment_id = if ack_rel {
                         Some(self.reliable_rx.next_expected_id())
@@ -787,7 +791,7 @@ impl Endpoint {
                         nonce: segment_nonce,
                     };
 
-                    println!("SEND SEGMENT {} {}", header.id, header.nonce);
+                    // println!("SEND SEGMENT {} {}", header.id, header.nonce);
 
                     frame_writer.write(&header);
 

@@ -214,7 +214,7 @@ impl SegmentTx {
             // Nonce checks out, add received history bits to history buffer
             self.ack_history |= rx_history;
         } else {
-            println!("BAD NONCE");
+            // println!("BAD NONCE");
         }
 
         if self.ack_history == u32::MAX {

@@ -85,6 +85,7 @@ struct Timers {
     recv_timer: Timer,
 }
 
+#[derive(Debug)]
 pub enum Event {
     Connect,
     Disconnect,
@@ -204,7 +205,9 @@ impl ClientCore {
         }
 
         if let Some(t_ms) = timeout_ms {
-            return Some(time::Duration::from_millis(t_ms - now_ms));
+            let remaining_ms = if t_ms >= now_ms { t_ms - now_ms } else { 0 };
+
+            return Some(time::Duration::from_millis(remaining_ms));
         }
 
         return None;
@@ -225,11 +228,11 @@ impl ClientCore {
 
                             match state.phase {
                                 HandshakePhase::Alpha => {
-                                    println!("re-requesting phase α...");
+                                    // println!("re-requesting phase α...");
                                     self.socket_tx.send(&state.frame);
                                 }
                                 HandshakePhase::Beta => {
-                                    println!("re-requesting phase β...");
+                                    // println!("re-requesting phase β...");
                                     self.socket_tx.send(&state.frame);
                                 }
                             }
@@ -304,7 +307,7 @@ impl ClientCore {
                             }
                             .write_boxed();
 
-                            println!("requesting phase β...");
+                            // println!("requesting phase β...");
                             self.socket_tx.send(&state.frame);
                         }
                     }
@@ -533,7 +536,7 @@ impl Client {
         }
         .write_boxed();
 
-        println!("requesting phase α...");
+        // println!("requesting phase α...");
         socket_tx.send(&handshake_frame);
 
         let state = State::Handshake(HandshakeState {

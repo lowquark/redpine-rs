@@ -165,11 +165,13 @@ mod server;
 mod socket;
 mod timer_wheel;
 
+#[derive(Clone, Copy, Debug)]
 pub enum SendMode {
     Reliable,
     Unreliable(u16),
 }
 
+#[derive(Debug)]
 pub enum ErrorKind {
     Timeout,
     Capacity,
