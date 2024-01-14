@@ -33,24 +33,15 @@ pub struct Config {
     pub timeout_time_ms: u64,
 }
 
-// TODO: Receive timer is unneeded, remove names altogether
-#[derive(Clone, Copy, Debug)]
-pub enum TimerName {
-    // Resend time out (no ack from remote)
-    Rto,
-    // When to skip a hole in the reorder buffer
-    Receive,
-}
-
 pub trait HostContext {
     // Called to send a frame to the remote host.
     fn send_frame(&mut self, frame_bytes: &[u8]);
 
-    // Called to set the given timer
-    fn set_timer(&mut self, timer: TimerName, time_ms: u64);
+    // Called to set the rto timer
+    fn set_rto_timer(&mut self, time_ms: u64);
 
-    // Called to unset the given timer
-    fn unset_timer(&mut self, timer: TimerName);
+    // Called to unset the rto timer
+    fn unset_rto_timer(&mut self);
 
     // Called when the endpoint object itself should be destroyed
     fn destroy_self(&mut self);
@@ -373,12 +364,12 @@ impl Endpoint {
         if let Some(ref mut state) = self.rto_timer_state {
             if segment_id == self.segment_tx.next_id() {
                 // All caught up
-                ctx.unset_timer(TimerName::Rto);
+                ctx.unset_rto_timer();
                 self.rto_timer_state = None;
             } else {
                 // More acks expected
                 // TODO: Only reset when new data has been acknowledged
-                ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
+                ctx.set_rto_timer(now_ms + self.rto_ms);
                 state.rto_ms = self.rto_ms;
                 state.rto_sum_ms = 0;
             }
@@ -551,12 +542,13 @@ impl Endpoint {
         }
     }
 
-    fn enter_closing<C>(&mut self, now_ms: u64, ctx: &mut C) where
+    fn enter_closing<C>(&mut self, now_ms: u64, ctx: &mut C)
+    where
         C: HostContext,
     {
         self.state_id = StateId::Closing;
 
-        ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
+        ctx.set_rto_timer(now_ms + self.rto_ms);
         self.rto_timer_state = Some(RtoTimerState {
             rto_ms: self.rto_ms,
             rto_sum_ms: 0,
@@ -565,14 +557,15 @@ impl Endpoint {
         self.send_close_frame(ctx);
     }
 
-    fn enter_closed<C>(&mut self, now_ms: u64, ctx: &mut C) where
+    fn enter_closed<C>(&mut self, now_ms: u64, ctx: &mut C)
+    where
         C: HostContext,
     {
         self.state_id = StateId::Closed;
         ctx.on_disconnect();
 
         // Use RTO timer to leave closed state
-        ctx.set_timer(TimerName::Rto, now_ms + DISCONNECT_TIMEOUT_MS);
+        ctx.set_rto_timer(now_ms + DISCONNECT_TIMEOUT_MS);
         self.rto_timer_state = None;
     }
 
@@ -635,94 +628,82 @@ impl Endpoint {
         }
     }
 
-    pub fn handle_timer<C>(&mut self, timer: TimerName, now_ms: u64, ctx: &mut C)
+    pub fn handle_timer<C>(&mut self, now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
         match self.state_id {
-            StateId::Active => match timer {
-                TimerName::Rto => {
-                    let timer_state = self
-                        .rto_timer_state
-                        .as_mut()
-                        .expect("rto timer fired but state is none");
+            StateId::Active => {
+                let timer_state = self
+                    .rto_timer_state
+                    .as_mut()
+                    .expect("rto timer fired but state is none");
 
-                    timer_state.rto_sum_ms += timer_state.rto_ms;
+                timer_state.rto_sum_ms += timer_state.rto_ms;
 
-                    if timer_state.rto_sum_ms >= self.config.timeout_time_ms {
-                        // No acks received for longer than user-specified timeout
-                        self.state_id = StateId::Zombie;
-                        ctx.on_timeout();
-
-                        // I've seen things you people wouldn't believe... Attack ships on fire off
-                        // the shoulder of Orion... I watched C-beams glitter in the dark near the
-                        // Tannhäuser Gate. All those moments will be lost in time, like tears in
-                        // rain... Time to die.
-                        ctx.destroy_self();
-                    } else {
-                        self.rto_ms *= 2;
-                        self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
-
-                        ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
-                        timer_state.rto_ms = self.rto_ms;
-
-                        // Notify congestion control of timeout
-                        self.cc_state.handle_timeout();
-
-                        // TODO: Reset the reliable fragment tx buffer
-
-                        // Attempt to resynchronize now that the pipe has drained
-                        self.send_stream_sync_frame(self.segment_tx.next_id(), ctx);
-
-                        // Don't waste an opportunity to send data
-                        self.flush_stream(false, false, now_ms, ctx);
-                    }
-                }
-                TimerName::Receive => {
-                }
-            },
-            StateId::Closing => match timer {
-                TimerName::Rto => {
-                    let timer_state = self
-                        .rto_timer_state
-                        .as_mut()
-                        .expect("rto timer fired but state is none");
-
-                    timer_state.rto_sum_ms += timer_state.rto_ms;
-
-                    if timer_state.rto_sum_ms >= DISCONNECT_TIMEOUT_MS {
-                        // No ack received, give up trying to disconnect
-                        self.state_id = StateId::Zombie;
-                        ctx.on_timeout();
-
-                        // (See previous)
-                        ctx.destroy_self();
-                    } else {
-                        self.rto_ms *= 2;
-                        self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
-
-                        ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
-                        timer_state.rto_ms = self.rto_ms;
-
-                        // Send another close frame
-                        self.send_close_frame(ctx);
-                    }
-                }
-                TimerName::Receive => {
-                }
-            },
-            StateId::Closed => match timer {
-                TimerName::Rto => {
-                    // Finished acking resent close requests and/or soaking up stray packets
+                if timer_state.rto_sum_ms >= self.config.timeout_time_ms {
+                    // No acks received for longer than user-specified timeout
                     self.state_id = StateId::Zombie;
+                    ctx.on_timeout();
 
+                    // I've seen things you people wouldn't believe... Attack ships on fire off
+                    // the shoulder of Orion... I watched C-beams glitter in the dark near the
+                    // Tannhäuser Gate. All those moments will be lost in time, like tears in
+                    // rain... Time to die.
                     ctx.destroy_self();
+                } else {
+                    self.rto_ms *= 2;
+                    self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
 
-                    // println!("FIN");
+                    ctx.set_rto_timer(now_ms + self.rto_ms);
+                    timer_state.rto_ms = self.rto_ms;
+
+                    // Notify congestion control of timeout
+                    self.cc_state.handle_timeout();
+
+                    // TODO: Reset the reliable fragment tx buffer
+
+                    // Attempt to resynchronize now that the pipe has drained
+                    self.send_stream_sync_frame(self.segment_tx.next_id(), ctx);
+
+                    // Don't waste an opportunity to send data
+                    self.flush_stream(false, false, now_ms, ctx);
                 }
-                TimerName::Receive => {
+            }
+            StateId::Closing => {
+                let timer_state = self
+                    .rto_timer_state
+                    .as_mut()
+                    .expect("rto timer fired but state is none");
+
+                timer_state.rto_sum_ms += timer_state.rto_ms;
+
+                if timer_state.rto_sum_ms >= self.config.timeout_time_ms {
+                    // No ack received, give up trying to disconnect
+                    self.state_id = StateId::Zombie;
+                    ctx.on_timeout();
+
+                    // (See previous)
+                    ctx.destroy_self();
+                } else {
+                    self.rto_ms *= 2;
+                    self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
+
+                    ctx.set_rto_timer(now_ms + self.rto_ms);
+                    timer_state.rto_ms = self.rto_ms;
+
+                    // Send another close frame
+                    self.send_close_frame(ctx);
                 }
-            },
+            }
+            StateId::Closed => {
+                // Finished acking resent close requests and/or soaking up stray packets
+                self.state_id = StateId::Zombie;
+
+                ctx.destroy_self();
+
+                // println!("FIN");
+            }
             _ => (),
         }
     }
@@ -822,7 +803,7 @@ impl Endpoint {
 
                     // Acks are expected, set the resend timeout if not set already
                     if self.rto_timer_state.is_none() {
-                        ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
+                        ctx.set_rto_timer(now_ms + self.rto_ms);
                         self.rto_timer_state = Some(RtoTimerState {
                             rto_ms: self.rto_ms,
                             rto_sum_ms: 0,
@@ -920,12 +901,12 @@ mod tests {
             println!("send frame {:02X?}", frame_bytes);
         }
 
-        fn set_timer(&mut self, timer: TimerName, time_ms: u64) {
-            println!("set timer {:?} for {}", timer, time_ms);
+        fn set_rto_timer(&mut self, time_ms: u64) {
+            println!("set rto timer for {}", time_ms);
         }
 
-        fn unset_timer(&mut self, timer: TimerName) {
-            println!("unset timer {:?}", timer);
+        fn unset_rto_timer(&mut self) {
+            println!("unset rto timer");
         }
 
         fn destroy_self(&mut self) {

@@ -40,8 +40,6 @@ in the reliable queue are still under consideration.)
 
   * Implement Nagle's algorithm
 
-  * Remove unused receive timer
-
   * Figure out data-limited congestion-avoidance
 
   * ???

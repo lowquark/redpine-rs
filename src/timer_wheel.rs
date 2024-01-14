@@ -521,9 +521,7 @@ mod tests {
                 let expire_time_ms =
                     compute_expiration_time_ms(self.last_step_time_ms, timeout_time_ms);
 
-                let timer_data = Rc::new(RefCell::new(TimerState::new(
-                    expire_time_ms,
-                )));
+                let timer_data = Rc::new(RefCell::new(TimerState::new(expire_time_ms)));
 
                 let id = self
                     .wheel

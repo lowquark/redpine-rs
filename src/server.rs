@@ -76,23 +76,13 @@ impl Config {
 
 type PeerId = u32;
 
-struct PeerTimerData {
-    peer_rc: PeerRc,
-    timer_name: endpoint::TimerName,
-}
-
-struct PeerTimers {
-    rto_timer_id: Option<timer_wheel::TimerId>,
-    receive_timer_id: Option<timer_wheel::TimerId>,
-}
-
 struct PeerCore {
     // Peer identifier, 0 is a valid identifier
     id: PeerId,
     // Remote address
     addr: net::SocketAddr,
     // Current timer states
-    timers: PeerTimers,
+    rto_timer: Option<timer_wheel::TimerId>,
 }
 
 struct Peer {
@@ -113,7 +103,7 @@ struct PeerTable {
     free_ids: Vec<PeerId>,
 }
 
-type TimerWheel = timer_wheel::TimerWheel<PeerTimerData>;
+type TimerWheel = timer_wheel::TimerWheel<PeerRc>;
 
 #[derive(Debug)]
 pub enum Event {
@@ -157,27 +147,11 @@ pub struct Server {
     // Socket receive handle
     socket_rx: socket::SocketRx,
     // Always-allocated timer expiration buffer
-    timer_data_buffer: Vec<PeerTimerData>,
+    timer_data_buffer: Vec<PeerRc>,
 }
 
 pub struct PeerHandle {
     peer: PeerRc,
-}
-
-impl PeerTimers {
-    fn new() -> Self {
-        Self {
-            rto_timer_id: None,
-            receive_timer_id: None,
-        }
-    }
-
-    fn get_mut(&mut self, name: endpoint::TimerName) -> &mut Option<timer_wheel::TimerId> {
-        match name {
-            endpoint::TimerName::Rto => &mut self.rto_timer_id,
-            endpoint::TimerName::Receive => &mut self.receive_timer_id,
-        }
-    }
 }
 
 impl Peer {
@@ -191,7 +165,7 @@ impl Peer {
             core: PeerCore {
                 id,
                 addr,
-                timers: PeerTimers::new(),
+                rto_timer: None,
             },
             endpoint: endpoint::Endpoint::new(endpoint_config),
             server_weak,
@@ -278,24 +252,22 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         self.server.socket_tx.send(frame_bytes, &self.peer.addr);
     }
 
-    fn set_timer(&mut self, name: endpoint::TimerName, time_ms: u64) {
-        let timer_id = self.peer.timers.get_mut(name);
+    fn set_rto_timer(&mut self, time_ms: u64) {
+        let ref mut timer_id = self.peer.rto_timer;
 
         if let Some(id) = timer_id.take() {
             self.server.timer_wheel.unset_timer(id);
         }
 
-        *timer_id = Some(self.server.timer_wheel.set_timer(
-            time_ms,
-            PeerTimerData {
-                peer_rc: Rc::clone(self.peer_rc),
-                timer_name: name,
-            },
-        ))
+        *timer_id = Some(
+            self.server
+                .timer_wheel
+                .set_timer(time_ms, Rc::clone(self.peer_rc)),
+        )
     }
 
-    fn unset_timer(&mut self, name: endpoint::TimerName) {
-        let timer_id = self.peer.timers.get_mut(name);
+    fn unset_rto_timer(&mut self) {
+        let ref mut timer_id = self.peer.rto_timer;
 
         if let Some(id) = timer_id.take() {
             self.server.timer_wheel.unset_timer(id);
@@ -370,7 +342,7 @@ impl ServerCore {
         (time::Instant::now() - self.time_ref).as_millis() as u64
     }
 
-    fn step_timer_wheel(&mut self, timer_data_buffer: &mut Vec<PeerTimerData>) -> u64 {
+    fn step_timer_wheel(&mut self, timer_data_buffer: &mut Vec<PeerRc>) -> u64 {
         let now_ms = self.time_now_ms();
 
         self.timer_wheel.step(now_ms, timer_data_buffer);
@@ -403,16 +375,15 @@ impl ServerCore {
     }
 
     /// Processes all pending timer events.
-    pub fn handle_timeouts(&mut self, timer_data_buffer: &mut Vec<PeerTimerData>) {
+    pub fn handle_timeouts(&mut self, timer_data_buffer: &mut Vec<PeerRc>) {
         let now_ms = self.step_timer_wheel(timer_data_buffer);
 
-        for timer_data in timer_data_buffer.drain(..) {
-            let ref mut peer = *timer_data.peer_rc.borrow_mut();
+        for peer_rc in timer_data_buffer.drain(..) {
+            let ref mut peer = *peer_rc.borrow_mut();
 
-            let ref mut ctx = EndpointContext::new(self, &mut peer.core, &timer_data.peer_rc);
+            let ref mut ctx = EndpointContext::new(self, &mut peer.core, &peer_rc);
 
-            peer.endpoint
-                .handle_timer(timer_data.timer_name, now_ms, ctx);
+            peer.endpoint.handle_timer(now_ms, ctx);
         }
     }
 

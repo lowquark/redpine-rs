@@ -80,11 +80,6 @@ struct Timer {
     timeout_ms: Option<u64>,
 }
 
-struct Timers {
-    rto_timer: Timer,
-    recv_timer: Timer,
-}
-
 #[derive(Debug)]
 pub enum Event {
     Connect,
@@ -106,8 +101,8 @@ struct ClientCore {
     socket_tx: socket::ConnectedSocketTx,
     // Current mode of operation
     state: State,
-    // Pending timer events
-    timers: Timers,
+    // Pending RTO timer event
+    rto_timer: Timer,
     // Queue of events
     events: VecDeque<Event>,
 }
@@ -131,26 +126,12 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         self.client.socket_tx.send(frame_bytes);
     }
 
-    fn set_timer(&mut self, timer: endpoint::TimerName, time_ms: u64) {
-        match timer {
-            endpoint::TimerName::Rto => {
-                self.client.timers.rto_timer.timeout_ms = Some(time_ms);
-            }
-            endpoint::TimerName::Receive => {
-                self.client.timers.recv_timer.timeout_ms = Some(time_ms);
-            }
-        }
+    fn set_rto_timer(&mut self, time_ms: u64) {
+        self.client.rto_timer.timeout_ms = Some(time_ms);
     }
 
-    fn unset_timer(&mut self, timer: endpoint::TimerName) {
-        match timer {
-            endpoint::TimerName::Rto => {
-                self.client.timers.rto_timer.timeout_ms = None;
-            }
-            endpoint::TimerName::Receive => {
-                self.client.timers.recv_timer.timeout_ms = None;
-            }
-        }
+    fn unset_rto_timer(&mut self) {
+        self.client.rto_timer.timeout_ms = None;
     }
 
     fn destroy_self(&mut self) {
@@ -190,21 +171,7 @@ impl ClientCore {
     pub fn next_timer_timeout(&self) -> Option<time::Duration> {
         let now_ms = self.time_now_ms();
 
-        let mut timeout_ms = None;
-
-        for timer in [&self.timers.rto_timer, &self.timers.recv_timer] {
-            if let Some(timer_timeout_ms) = timer.timeout_ms {
-                if let Some(t_ms) = timeout_ms {
-                    if timer_timeout_ms < t_ms {
-                        timeout_ms = Some(timer_timeout_ms);
-                    }
-                } else {
-                    timeout_ms = Some(timer_timeout_ms);
-                }
-            }
-        }
-
-        if let Some(t_ms) = timeout_ms {
+        if let Some(t_ms) = self.rto_timer.timeout_ms {
             let remaining_ms = if t_ms >= now_ms { t_ms - now_ms } else { 0 };
 
             return Some(time::Duration::from_millis(remaining_ms));
@@ -213,32 +180,26 @@ impl ClientCore {
         return None;
     }
 
-    fn process_timeout(&mut self, timer_id: endpoint::TimerName, now_ms: u64) {
+    fn process_timeout(&mut self, now_ms: u64) {
         match &mut self.state {
             State::Handshake(state) => {
-                match timer_id {
-                    endpoint::TimerName::Rto => {
-                        if now_ms >= state.timeout_time_ms {
-                            // Connection failed
-                            self.events.push_back(Event::Error(ErrorKind::Timeout));
-                            self.state = State::Quiescent;
-                        } else {
-                            self.timers.rto_timer.timeout_ms =
-                                Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
+                if now_ms >= state.timeout_time_ms {
+                    // Connection failed
+                    self.events.push_back(Event::Error(ErrorKind::Timeout));
+                    self.state = State::Quiescent;
+                } else {
+                    self.rto_timer.timeout_ms = Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
 
-                            match state.phase {
-                                HandshakePhase::Alpha => {
-                                    // println!("re-requesting phase α...");
-                                    self.socket_tx.send(&state.frame);
-                                }
-                                HandshakePhase::Beta => {
-                                    // println!("re-requesting phase β...");
-                                    self.socket_tx.send(&state.frame);
-                                }
-                            }
+                    match state.phase {
+                        HandshakePhase::Alpha => {
+                            // println!("re-requesting phase α...");
+                            self.socket_tx.send(&state.frame);
+                        }
+                        HandshakePhase::Beta => {
+                            // println!("re-requesting phase β...");
+                            self.socket_tx.send(&state.frame);
                         }
                     }
-                    endpoint::TimerName::Receive => (),
                 }
             }
             State::Active(state) => {
@@ -246,9 +207,7 @@ impl ClientCore {
 
                 let ref mut host_ctx = EndpointContext::new(self);
 
-                endpoint_rc
-                    .borrow_mut()
-                    .handle_timer(timer_id, now_ms, host_ctx);
+                endpoint_rc.borrow_mut().handle_timer(now_ms, host_ctx);
             }
             State::Quiescent => {}
         }
@@ -257,20 +216,13 @@ impl ClientCore {
     pub fn process_timeouts(&mut self) {
         let now_ms = self.time_now_ms();
 
-        let timer_ids = [endpoint::TimerName::Rto, endpoint::TimerName::Receive];
+        let ref mut timer = self.rto_timer;
 
-        for timer_id in timer_ids {
-            let timer = match timer_id {
-                endpoint::TimerName::Rto => &mut self.timers.rto_timer,
-                endpoint::TimerName::Receive => &mut self.timers.recv_timer,
-            };
+        if let Some(timeout_ms) = timer.timeout_ms {
+            if now_ms >= timeout_ms {
+                timer.timeout_ms = None;
 
-            if let Some(timeout_ms) = timer.timeout_ms {
-                if now_ms >= timeout_ms {
-                    timer.timeout_ms = None;
-
-                    self.process_timeout(timer_id, now_ms);
-                }
+                self.process_timeout(now_ms);
             }
         }
     }
@@ -294,8 +246,7 @@ impl ClientCore {
                         if nonce_valid && params_compatible {
                             state.phase = HandshakePhase::Beta;
                             state.timeout_time_ms = now_ms + state.timeout_ms;
-                            self.timers.rto_timer.timeout_ms =
-                                Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
+                            self.rto_timer.timeout_ms = Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
 
                             use frame::serial::SimpleFrameWrite;
                             state.frame = frame::HandshakeBetaFrame {
@@ -328,9 +279,8 @@ impl ClientCore {
                         if frame.client_nonce == state.local_nonce {
                             match frame.error {
                                 None => {
-                                    // Reset any previous timers
-                                    self.timers.rto_timer.timeout_ms = None;
-                                    self.timers.recv_timer.timeout_ms = None;
+                                    // Reset previously used timer
+                                    self.rto_timer.timeout_ms = None;
 
                                     // Keep queued up packets to be sent later
                                     let packet_buffer = std::mem::take(&mut state.packet_buffer);
@@ -548,11 +498,8 @@ impl Client {
             local_nonce,
         });
 
-        let timers = Timers {
-            rto_timer: Timer {
-                timeout_ms: Some(HANDSHAKE_RESEND_TIMEOUT_MS),
-            },
-            recv_timer: Timer { timeout_ms: None },
+        let rto_timer = Timer {
+            timeout_ms: Some(HANDSHAKE_RESEND_TIMEOUT_MS),
         };
 
         let core = ClientCore {
@@ -560,7 +507,7 @@ impl Client {
             time_ref: time::Instant::now(),
             socket_tx,
             state,
-            timers,
+            rto_timer,
             events: VecDeque::new(),
         };
 
