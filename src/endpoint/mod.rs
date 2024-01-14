@@ -6,7 +6,6 @@ mod cc;
 mod segment_rx;
 mod segment_tx;
 
-const CLOSE_RESEND_TIMEOUT_MS: u64 = 2_000;
 const DISCONNECT_TIMEOUT_MS: u64 = 10_000;
 
 const FRAME_SIZE_MAX: usize = 1478;
@@ -34,7 +33,7 @@ pub struct Config {
     pub timeout_time_ms: u64,
 }
 
-// TODO: Rto timer is unneeded, remove names altogether
+// TODO: Receive timer is unneeded, remove names altogether
 #[derive(Clone, Copy, Debug)]
 pub enum TimerName {
     // Resend time out (no ack from remote)
@@ -237,7 +236,9 @@ struct RttState {
 }
 
 struct RtoTimerState {
+    // Original timer timeout value
     rto_ms: u64,
+    // Total timeout time
     rto_sum_ms: u64,
 }
 
@@ -478,8 +479,6 @@ impl Endpoint {
                         }
                     },
                 );
-
-                // TODO: Set the receive timer if there are frames in the receive buffer
             }
         }
 
@@ -552,6 +551,31 @@ impl Endpoint {
         }
     }
 
+    fn enter_closing<C>(&mut self, now_ms: u64, ctx: &mut C) where
+        C: HostContext,
+    {
+        self.state_id = StateId::Closing;
+
+        ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
+        self.rto_timer_state = Some(RtoTimerState {
+            rto_ms: self.rto_ms,
+            rto_sum_ms: 0,
+        });
+
+        self.send_close_frame(ctx);
+    }
+
+    fn enter_closed<C>(&mut self, now_ms: u64, ctx: &mut C) where
+        C: HostContext,
+    {
+        self.state_id = StateId::Closed;
+        ctx.on_disconnect();
+
+        // Use RTO timer to leave closed state
+        ctx.set_timer(TimerName::Rto, now_ms + DISCONNECT_TIMEOUT_MS);
+        self.rto_timer_state = None;
+    }
+
     pub fn handle_frame<C>(
         &mut self,
         frame_type: frame::FrameType,
@@ -575,15 +599,8 @@ impl Endpoint {
                     if self.validate_close_frame(payload_bytes) {
                         // Acknowledge
                         self.send_close_ack_frame(ctx);
-
-                        // Unset to prevent spurious timer event
-                        ctx.unset_timer(TimerName::Rto);
-                        // Set to ensure eventual destruction
-                        ctx.set_timer(TimerName::Receive, now_ms + DISCONNECT_TIMEOUT_MS);
-
                         // We are now disconnected
-                        self.state_id = StateId::Closed;
-                        ctx.on_disconnect();
+                        self.enter_closed(now_ms, ctx);
                     }
                 }
                 _ => (),
@@ -593,23 +610,14 @@ impl Endpoint {
                     if self.validate_close_frame(payload_bytes) {
                         // Acknowledge
                         self.send_close_ack_frame(ctx);
-
-                        // Unset to prevent spurious timer event
-                        ctx.unset_timer(TimerName::Rto);
-
                         // We are now disconnected
-                        self.state_id = StateId::Closed;
-                        ctx.on_disconnect();
+                        self.enter_closed(now_ms, ctx);
                     }
                 }
                 frame::FrameType::CloseAck => {
                     if self.validate_close_ack_frame(payload_bytes) {
-                        // Unset to prevent spurious timer event
-                        ctx.unset_timer(TimerName::Rto);
-
                         // We are now disconnected
-                        self.state_id = StateId::Closed;
-                        ctx.on_disconnect();
+                        self.enter_closed(now_ms, ctx);
                     }
                 }
                 _ => (),
@@ -634,19 +642,16 @@ impl Endpoint {
         match self.state_id {
             StateId::Active => match timer {
                 TimerName::Rto => {
-                    // println!("STREAM RESEND TIMEOUT");
-
-                    let ref mut timer_state = self
+                    let timer_state = self
                         .rto_timer_state
                         .as_mut()
-                        .expect("timer fired but state is none");
+                        .expect("rto timer fired but state is none");
 
                     timer_state.rto_sum_ms += timer_state.rto_ms;
 
-                    // println!("RTO SUM MS: {}", timer_state.rto_sum_ms);
-
                     if timer_state.rto_sum_ms >= self.config.timeout_time_ms {
                         // No acks received for longer than user-specified timeout
+                        self.state_id = StateId::Zombie;
                         ctx.on_timeout();
 
                         // I've seen things you people wouldn't believe... Attack ships on fire off
@@ -674,34 +679,48 @@ impl Endpoint {
                     }
                 }
                 TimerName::Receive => {
-                    // println!("STREAM RECEIVE FLUSH TIMEOUT");
                 }
             },
             StateId::Closing => match timer {
                 TimerName::Rto => {
-                    // No ack received within resend timeout
-                    // println!("CLOSING TIMEOUT");
-                    self.send_close_frame(ctx);
+                    let timer_state = self
+                        .rto_timer_state
+                        .as_mut()
+                        .expect("rto timer fired but state is none");
 
-                    ctx.set_timer(TimerName::Rto, now_ms + CLOSE_RESEND_TIMEOUT_MS);
+                    timer_state.rto_sum_ms += timer_state.rto_ms;
+
+                    if timer_state.rto_sum_ms >= DISCONNECT_TIMEOUT_MS {
+                        // No ack received, give up trying to disconnect
+                        self.state_id = StateId::Zombie;
+                        ctx.on_timeout();
+
+                        // (See previous)
+                        ctx.destroy_self();
+                    } else {
+                        self.rto_ms *= 2;
+                        self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
+
+                        ctx.set_timer(TimerName::Rto, now_ms + self.rto_ms);
+                        timer_state.rto_ms = self.rto_ms;
+
+                        // Send another close frame
+                        self.send_close_frame(ctx);
+                    }
                 }
                 TimerName::Receive => {
-                    // Disconnection timed out entirely
-                    // println!("CLOSING FINAL TIMEOUT");
-                    self.state_id = StateId::Zombie;
-                    ctx.on_timeout();
-
-                    ctx.destroy_self();
                 }
             },
             StateId::Closed => match timer {
-                TimerName::Rto => (),
-                TimerName::Receive => {
+                TimerName::Rto => {
                     // Finished acking resent close requests and/or soaking up stray packets
-                    // println!("FIN");
                     self.state_id = StateId::Zombie;
 
                     ctx.destroy_self();
+
+                    // println!("FIN");
+                }
+                TimerName::Receive => {
                 }
             },
             _ => (),
@@ -879,14 +898,7 @@ impl Endpoint {
         C: HostContext,
     {
         if self.state_id == StateId::Active {
-            self.state_id = StateId::Closing;
-
-            self.send_close_frame(ctx);
-
-            // Set to resend close resquests
-            ctx.set_timer(TimerName::Rto, now_ms + CLOSE_RESEND_TIMEOUT_MS);
-            // Set to ensure eventual destruction
-            ctx.set_timer(TimerName::Receive, now_ms + DISCONNECT_TIMEOUT_MS);
+            self.enter_closing(now_ms, ctx);
         }
     }
 }
