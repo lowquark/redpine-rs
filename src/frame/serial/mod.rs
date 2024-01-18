@@ -550,8 +550,6 @@ impl<'a> FrameWriter<'a> {
     }
 
     pub fn finalize(self) -> &'a [u8] {
-        // TODO: Compute CRC
-
         let ref payload = self.buffer[..self.write_idx];
 
         let frame_crc = crc::compute(payload);
