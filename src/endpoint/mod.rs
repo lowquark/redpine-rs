@@ -8,7 +8,7 @@ mod segment_tx;
 
 const DISCONNECT_TIMEOUT_MS: u64 = 10_000;
 
-const FRAME_SIZE_MAX: usize = 1478;
+const FRAME_SIZE_MAX: usize = 1472;
 const SEGMENT_WINDOW_SIZE: u32 = 4096;
 const FRAGMENT_SIZE: usize = 1024;
 const FRAGMENT_WINDOW_SIZE: u32 = 4096;

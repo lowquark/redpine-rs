@@ -10,7 +10,7 @@ use super::socket;
 use super::ErrorKind;
 use super::SendMode;
 
-const FRAME_SIZE_MAX: usize = 1478;
+const FRAME_SIZE_MAX: usize = 1472;
 
 const HANDSHAKE_TIMEOUT_DEFAULT_MS: u64 = 10_000;
 const HANDSHAKE_TIMEOUT_MIN_MS: u64 = 2_000;
@@ -228,6 +228,7 @@ impl ClientCore {
     }
 
     fn handle_handshake_alpha_ack(&mut self, payload_bytes: &[u8], now_ms: u64) {
+        use frame::serial::SimpleFrameWrite;
         use frame::serial::SimplePayloadRead;
 
         match self.state {
@@ -248,7 +249,6 @@ impl ClientCore {
                             state.timeout_time_ms = now_ms + state.timeout_ms;
                             self.rto_timer.timeout_ms = Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
 
-                            use frame::serial::SimpleFrameWrite;
                             state.frame = frame::HandshakeBetaFrame {
                                 client_params,
                                 client_nonce: frame.client_nonce,
@@ -353,7 +353,7 @@ impl ClientCore {
     fn handle_frame(&mut self, frame_bytes: &[u8]) {
         // println!(" -> {:02X?}", frame_bytes);
 
-        if !frame::serial::check_size(frame_bytes) {
+        if !frame::serial::verify_minimum_size(frame_bytes) {
             return;
         }
 
@@ -478,13 +478,13 @@ impl Client {
 
         let local_nonce = rand::random::<u32>();
 
-        use frame::serial::SimpleFrameWrite;
-
         let handshake_frame = frame::HandshakeAlphaFrame {
             protocol_id: frame::serial::PROTOCOL_ID,
             client_nonce: local_nonce,
-        }
-        .write_boxed();
+        };
+
+        let handshake_frame =
+            frame::serial::write_handshake_alpha(&handshake_frame, FRAME_SIZE_MAX);
 
         // println!("requesting phase α...");
         socket_tx.send(&handshake_frame);

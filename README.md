@@ -34,8 +34,6 @@ in the reliable queue are still under consideration.)
 
 # TODO
 
-  * Pad initial frame to MTU
-
   * Use CSPRNG when initializing SipHash key
 
   * Implement Nagle's algorithm

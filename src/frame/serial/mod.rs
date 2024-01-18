@@ -36,6 +36,8 @@ const FRAME_TYPE_STREAM_ACK: u8 = 0x07;
 const FRAME_TYPE_STREAM_SEGMENT_ACK: u8 = 0x08;
 const FRAME_TYPE_STREAM_SYNC: u8 = 0x09;
 
+const HANDSHAKE_ALPHA_FRAME_SIZE_MAX: usize = 1472;
+
 pub struct Reader<'a> {
     ptr: *const u8,
     bytes_read: usize,
@@ -599,12 +601,28 @@ impl<'a> PayloadReader<'a> {
     }
 }
 
-pub fn check_size(frame_bytes: &[u8]) -> bool {
+pub fn verify_minimum_size(frame_bytes: &[u8]) -> bool {
     frame_bytes.len() >= FRAME_OVERHEAD_SIZE
 }
 
+pub fn verify_handshake_alpha_size_and_crc(frame_bytes: &[u8], frame_size_max: usize) -> bool {
+    if frame_bytes.len() == frame_size_max.min(HANDSHAKE_ALPHA_FRAME_SIZE_MAX) {
+        return verify_crc(&frame_bytes[..HANDSHAKE_ALPHA_SIZE + FRAME_OVERHEAD_SIZE]);
+    }
+
+    return false;
+}
+
+pub fn verify_handshake_beta_size_and_crc(frame_bytes: &[u8]) -> bool {
+    if frame_bytes.len() == HANDSHAKE_BETA_SIZE + FRAME_OVERHEAD_SIZE {
+        return verify_crc(&frame_bytes);
+    }
+
+    return false;
+}
+
 pub fn read_type(frame_bytes: &[u8]) -> Option<FrameType> {
-    debug_assert!(check_size(frame_bytes));
+    debug_assert!(verify_minimum_size(frame_bytes));
 
     let frame_type = match frame_bytes[0] & FRAME_TYPE_MASK {
         FRAME_TYPE_HANDSHAKE_ALPHA => FrameType::HandshakeAlpha,
@@ -623,20 +641,19 @@ pub fn read_type(frame_bytes: &[u8]) -> Option<FrameType> {
     Some(frame_type)
 }
 
-pub fn verify_crc(frame_bytes: &[u8]) -> bool {
-    debug_assert!(check_size(frame_bytes));
+pub fn verify_crc(buffer: &[u8]) -> bool {
+    debug_assert!(buffer.len() >= crc::SIZE);
 
-    let ref data_bytes = frame_bytes[..frame_bytes.len() - crc::SIZE];
+    let ref data = buffer[..buffer.len() - crc::SIZE];
 
-    let mut crc_bytes = [0u8; crc::SIZE];
-    crc_bytes.copy_from_slice(&frame_bytes[frame_bytes.len() - crc::SIZE..]);
-    let frame_crc = u32::from_le_bytes(crc_bytes);
+    let crc_bytes = buffer[buffer.len() - crc::SIZE..].try_into().unwrap();
+    let crc = u32::from_le_bytes(crc_bytes);
 
-    crc::compute(data_bytes) == frame_crc
+    crc::compute(data) == crc
 }
 
 pub fn payload(frame_bytes: &[u8]) -> &[u8] {
-    debug_assert!(check_size(frame_bytes));
+    debug_assert!(verify_minimum_size(frame_bytes));
 
     let payload_begin = FRAME_HEADER_SIZE;
     let payload_end = frame_bytes.len() - FRAME_CRC_SIZE;
@@ -717,6 +734,15 @@ where
     }
 }
 
+pub fn write_handshake_alpha(obj: &HandshakeAlphaFrame, frame_size_max: usize) -> Box<[u8]> {
+    let frame_size = frame_size_max.min(HANDSHAKE_ALPHA_FRAME_SIZE_MAX);
+    let mut buffer = vec![0; frame_size].into_boxed_slice();
+    let mut wr = FrameWriter::new(&mut buffer, FrameType::HandshakeAlpha);
+    wr.write(obj);
+    wr.finalize();
+    return buffer;
+}
+
 pub trait SimplePayloadRead {
     fn read(src: &[u8]) -> Option<Self>
     where
@@ -787,7 +813,7 @@ mod tests {
 
             let frame = writer.finalize();
 
-            assert!(check_size(frame));
+            assert!(verify_minimum_size(frame));
             assert!(verify_crc(frame));
             assert_eq!(read_type(frame), Some(FrameType::StreamSegment));
 

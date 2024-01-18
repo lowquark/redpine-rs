@@ -30,7 +30,7 @@ const TIMER_WHEEL_CONFIG: [timer_wheel::ArrayConfig; 3] = [
     },
 ];
 
-const FRAME_SIZE_MAX: usize = 1478;
+const FRAME_SIZE_MAX: usize = 1472;
 
 const PEER_COUNT_MAX_DEFAULT: usize = 8;
 const PEER_COUNT_MAX_MAX: usize = 65536;
@@ -389,11 +389,19 @@ impl ServerCore {
 
     fn handle_handshake_alpha(
         &mut self,
-        payload_bytes: &[u8],
+        frame_bytes: &[u8],
         sender_addr: &net::SocketAddr,
         now_ms: u64,
     ) {
+        use frame::serial::SimpleFrame;
+        use frame::serial::SimpleFrameWrite;
         use frame::serial::SimplePayloadRead;
+
+        if !frame::serial::verify_handshake_alpha_size_and_crc(frame_bytes, FRAME_SIZE_MAX) {
+            return;
+        }
+
+        let payload_bytes = frame::serial::payload(frame_bytes);
 
         if let Some(frame) = frame::HandshakeAlphaFrame::read(payload_bytes) {
             if frame.protocol_id == frame::serial::PROTOCOL_ID {
@@ -419,9 +427,6 @@ impl ServerCore {
                     ),
                 };
 
-                use frame::serial::SimpleFrame;
-                use frame::serial::SimpleFrameWrite;
-
                 let ref mut buffer = [0u8; frame::HandshakeAlphaAckFrame::FRAME_SIZE];
                 let ack_frame_bytes = ack_frame.write(buffer);
 
@@ -433,11 +438,19 @@ impl ServerCore {
 
     fn handle_handshake_beta(
         &mut self,
-        payload_bytes: &[u8],
+        frame_bytes: &[u8],
         sender_addr: &net::SocketAddr,
         now_ms: u64,
     ) {
+        use frame::serial::SimpleFrame;
+        use frame::serial::SimpleFrameWrite;
         use frame::serial::SimplePayloadRead;
+
+        if !frame::serial::verify_handshake_beta_size_and_crc(frame_bytes) {
+            return;
+        }
+
+        let payload_bytes = frame::serial::payload(frame_bytes);
 
         if let Some(frame) = frame::HandshakeBetaFrame::read(payload_bytes) {
             let timestamp_now = now_ms as u32;
@@ -450,18 +463,19 @@ impl ServerCore {
                 frame.server_timestamp,
             );
 
-            let server_params = frame::ConnectionParams {
-                packet_size_in_max: u32::max_value(),
-                packet_size_out_max: u32::max_value(),
-            };
-
             let mac_valid = frame.server_mac == computed_mac;
             let timestamp_valid =
                 timestamp_now.wrapping_sub(frame.server_timestamp) < HANDSHAKE_TIMEOUT_MS;
-            let params_compatible =
-                connection_params_compatible(&frame.client_params, &server_params);
 
             if mac_valid && timestamp_valid {
+                let server_params = frame::ConnectionParams {
+                    packet_size_in_max: u32::max_value(),
+                    packet_size_out_max: u32::max_value(),
+                };
+
+                let params_compatible =
+                    connection_params_compatible(&frame.client_params, &server_params);
+
                 let error = if self.peer_table.contains(sender_addr) {
                     None
                 } else if self.peer_table.is_full() {
@@ -498,14 +512,11 @@ impl ServerCore {
                     None
                 };
 
-                // Always send an ack in case a previous ack was dropped.
+                // Always send an ack in case a previous ack was dropped
                 let ref ack_frame = frame::HandshakeBetaAckFrame {
                     client_nonce: frame.client_nonce,
                     error,
                 };
-
-                use frame::serial::SimpleFrame;
-                use frame::serial::SimpleFrameWrite;
 
                 let ref mut buffer = [0u8; frame::HandshakeBetaAckFrame::FRAME_SIZE];
                 let ack_frame_bytes = ack_frame.write(buffer);
@@ -519,12 +530,18 @@ impl ServerCore {
     fn handle_frame_other(
         &mut self,
         frame_type: frame::FrameType,
-        payload_bytes: &[u8],
+        frame_bytes: &[u8],
         sender_addr: &net::SocketAddr,
         now_ms: u64,
     ) {
         // If a peer is associated with this address, deliver this frame to its endpoint
         if let Some(peer_rc) = self.peer_table.find(sender_addr) {
+            if !frame::serial::verify_crc(frame_bytes) {
+                return;
+            }
+
+            let payload_bytes = frame::serial::payload(frame_bytes);
+
             let peer_rc = Rc::clone(&peer_rc);
 
             let ref mut peer = *peer_rc.borrow_mut();
@@ -541,34 +558,27 @@ impl ServerCore {
     fn handle_frame(&mut self, frame_bytes: &[u8], sender_addr: &net::SocketAddr) {
         // println!("{:?} -> {:02X?}", sender_addr, frame_bytes);
 
-        if !frame::serial::check_size(frame_bytes) {
+        if !frame::serial::verify_minimum_size(frame_bytes) {
             return;
         }
 
         if let Some(frame_type) = frame::serial::read_type(frame_bytes) {
-            if !frame::serial::verify_crc(frame_bytes) {
-                // We don't negotiate with entropy
-                return;
-            }
-
             // Initial handshakes are handled without an allocation in the peer table. Once a valid
             // open request is received, the sender's address is assumed valid (i.e. blockable) and
             // an entry in the peer table is created. Other frame types are handled by the
             // associated peer object.
 
-            let payload_bytes = frame::serial::payload(frame_bytes);
-
             let now_ms = self.time_now_ms();
 
             match frame_type {
                 frame::FrameType::HandshakeAlpha => {
-                    self.handle_handshake_alpha(payload_bytes, sender_addr, now_ms);
+                    self.handle_handshake_alpha(frame_bytes, sender_addr, now_ms);
                 }
                 frame::FrameType::HandshakeBeta => {
-                    self.handle_handshake_beta(payload_bytes, sender_addr, now_ms);
+                    self.handle_handshake_beta(frame_bytes, sender_addr, now_ms);
                 }
                 _ => {
-                    self.handle_frame_other(frame_type, payload_bytes, sender_addr, now_ms);
+                    self.handle_frame_other(frame_type, frame_bytes, sender_addr, now_ms);
                 }
             }
         }
