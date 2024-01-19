@@ -8,9 +8,11 @@ datagrams, and allows the application to mitigate the undesirable effects of
 network losses.
 
 While the underlying protocol has been developed from scratch, Redpine has an
-event-driven API based on the venerable `enet` library, and was written based
-on lessons learned during the development of its predecessor, `uflow`. In
-particular, Redpine makes four key improvements:
+event-driven API based on the venerable
+[ENet](https://github.com/lsalzman/enet), and was written based on lessons
+learned during the development of its predecessor,
+[UFlow](https://github.com/lowquark/uflow). In particular, Redpine makes four
+key improvements over UFlow:
 
 ### Event-driven, optionally-blocking implementation
 
@@ -59,6 +61,8 @@ attacks.
   * Implement Nagle's algorithm
 
   * Figure out data-limited congestion-avoidance
+
+  * Document
 
   * ???
 
