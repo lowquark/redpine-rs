@@ -1,3 +1,5 @@
+![decoration.png](./decoration.png)
+
 # redpine
 
 `redpine` is a connection-oriented UDP messaging library for real-time internet
