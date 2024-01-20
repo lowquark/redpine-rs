@@ -204,10 +204,11 @@ impl ClientCore {
             }
             State::Active(state) => {
                 let endpoint_rc = Rc::clone(&state.endpoint_rc);
+                let mut endpoint = endpoint_rc.borrow_mut();
 
                 let ref mut host_ctx = EndpointContext::new(self);
 
-                endpoint_rc.borrow_mut().handle_timer(now_ms, host_ctx);
+                endpoint.handle_timer(now_ms, host_ctx);
             }
             State::Quiescent => {}
         }
@@ -306,8 +307,10 @@ impl ClientCore {
                                     endpoint.init(now_ms, host_ctx);
 
                                     for (packet, mode) in packet_buffer.into_iter() {
-                                        endpoint.send(packet, mode, now_ms, host_ctx);
+                                        endpoint.enqueue(packet, mode, now_ms);
                                     }
+
+                                    endpoint.flush(now_ms, host_ctx);
                                 }
                                 Some(kind) => {
                                     // Connection failed
@@ -339,12 +342,11 @@ impl ClientCore {
         match self.state {
             State::Active(ref mut state) => {
                 let endpoint_rc = Rc::clone(&state.endpoint_rc);
+                let mut endpoint = endpoint_rc.borrow_mut();
 
                 let ref mut host_ctx = EndpointContext::new(self);
 
-                endpoint_rc
-                    .borrow_mut()
-                    .handle_frame(frame_type, payload_bytes, now_ms, host_ctx);
+                endpoint.handle_frame(frame_type, payload_bytes, now_ms, host_ctx);
             }
             _ => (),
         }
@@ -411,14 +413,31 @@ impl ClientCore {
             }
             State::Active(state) => {
                 let endpoint_rc = Rc::clone(&state.endpoint_rc);
+                let mut endpoint = endpoint_rc.borrow_mut();
 
                 let now_ms = self.time_now_ms();
 
                 let ref mut host_ctx = EndpointContext::new(self);
 
-                endpoint_rc
-                    .borrow_mut()
-                    .send(packet_bytes, mode, now_ms, host_ctx);
+                endpoint.enqueue(packet_bytes, mode, now_ms);
+                endpoint.flush(now_ms, host_ctx);
+            }
+            State::Quiescent => {}
+        }
+    }
+
+    pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+        match &mut self.state {
+            State::Handshake(state) => {
+                state.packet_buffer.push((packet_bytes, mode));
+            }
+            State::Active(state) => {
+                let endpoint_rc = Rc::clone(&state.endpoint_rc);
+                let mut endpoint = endpoint_rc.borrow_mut();
+
+                let now_ms = self.time_now_ms();
+
+                endpoint.enqueue(packet_bytes, mode, now_ms);
             }
             State::Quiescent => {}
         }
@@ -429,12 +448,13 @@ impl ClientCore {
             State::Handshake(_) => {}
             State::Active(state) => {
                 let endpoint_rc = Rc::clone(&state.endpoint_rc);
+                let mut endpoint = endpoint_rc.borrow_mut();
 
                 let now_ms = self.time_now_ms();
 
                 let ref mut host_ctx = EndpointContext::new(self);
 
-                endpoint_rc.borrow_mut().flush(now_ms, host_ctx);
+                endpoint.flush(now_ms, host_ctx);
             }
             State::Quiescent => {}
         }
@@ -445,12 +465,13 @@ impl ClientCore {
             State::Handshake(_) => {}
             State::Active(state) => {
                 let endpoint_rc = Rc::clone(&state.endpoint_rc);
+                let mut endpoint = endpoint_rc.borrow_mut();
 
                 let now_ms = self.time_now_ms();
 
                 let ref mut host_ctx = EndpointContext::new(self);
 
-                endpoint_rc.borrow_mut().disconnect(now_ms, host_ctx);
+                endpoint.disconnect(now_ms, host_ctx);
             }
             State::Quiescent => {}
         }
@@ -595,6 +616,10 @@ impl Client {
 
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
         self.core.send(packet_bytes, mode);
+    }
+
+    pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+        self.core.enqueue(packet_bytes, mode);
     }
 
     pub fn flush(&mut self) {

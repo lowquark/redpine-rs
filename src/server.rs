@@ -756,6 +756,10 @@ impl PeerHandle {
         Self { peer }
     }
 
+    pub fn id(&self) -> PeerId {
+        self.peer.borrow().core.id
+    }
+
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
         let ref mut peer = *self.peer.borrow_mut();
 
@@ -766,7 +770,20 @@ impl PeerHandle {
 
             let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
 
-            peer.endpoint.send(packet_bytes, mode, now_ms, ctx);
+            peer.endpoint.enqueue(packet_bytes, mode, now_ms);
+            peer.endpoint.flush(now_ms, ctx);
+        }
+    }
+
+    pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
+        let ref mut peer = *self.peer.borrow_mut();
+
+        if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
+            let ref mut server = *server_rc.borrow_mut();
+
+            let now_ms = server.time_now_ms();
+
+            peer.endpoint.enqueue(packet_bytes, mode, now_ms);
         }
     }
 
@@ -796,10 +813,6 @@ impl PeerHandle {
 
             peer.endpoint.disconnect(now_ms, ctx);
         }
-    }
-
-    pub fn id(&self) -> PeerId {
-        self.peer.borrow().core.id
     }
 }
 

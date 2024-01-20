@@ -57,8 +57,6 @@ attacks.
 
 # TODO
 
-  * Implement Nagle's algorithm
-
   * Figure out data-limited congestion-avoidance
 
   * Document

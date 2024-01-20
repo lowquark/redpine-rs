@@ -22,7 +22,6 @@ fn main() {
                     println!("ServerEvent::Receive {:02X?}", packet_bytes);
 
                     peer.send(packet_bytes, redpine::SendMode::Unreliable(0));
-                    peer.flush();
                 }
                 redpine::ServerEvent::Error(_peer, kind) => match kind {
                     redpine::ErrorKind::Timeout => {

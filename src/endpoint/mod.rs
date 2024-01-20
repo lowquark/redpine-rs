@@ -310,13 +310,27 @@ impl Endpoint {
         ctx.on_connect();
     }
 
-    pub fn send<C>(&mut self, packet_bytes: Box<[u8]>, mode: SendMode, now_ms: u64, ctx: &mut C)
+    pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode, now_ms: u64) {
+        if self.state_id == StateId::Active {
+            self.fragment_tx.enqueue(packet_bytes, mode, now_ms);
+        }
+    }
+
+    pub fn flush<C>(&mut self, now_ms: u64, ctx: &mut C)
     where
         C: HostContext,
     {
         if self.state_id == StateId::Active {
-            self.fragment_tx.enqueue(packet_bytes, mode, now_ms);
             self.flush_stream(false, false, now_ms, ctx);
+        }
+    }
+
+    pub fn disconnect<C>(&mut self, now_ms: u64, ctx: &mut C)
+    where
+        C: HostContext,
+    {
+        if self.state_id == StateId::Active {
+            self.enter_closing(now_ms, ctx);
         }
     }
 
@@ -828,15 +842,6 @@ impl Endpoint {
         }
     }
 
-    pub fn flush<C>(&mut self, now_ms: u64, ctx: &mut C)
-    where
-        C: HostContext,
-    {
-        if self.state_id == StateId::Active {
-            self.flush_stream(false, false, now_ms, ctx);
-        }
-    }
-
     fn send_close_frame<C>(&mut self, ctx: &mut C)
     where
         C: HostContext,
@@ -872,15 +877,6 @@ impl Endpoint {
         let frame = frame::StreamSync { next_segment_id };
 
         ctx.send_frame(frame.write(&mut self.tx_buffer));
-    }
-
-    pub fn disconnect<C>(&mut self, now_ms: u64, ctx: &mut C)
-    where
-        C: HostContext,
-    {
-        if self.state_id == StateId::Active {
-            self.enter_closing(now_ms, ctx);
-        }
     }
 }
 
