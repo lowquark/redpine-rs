@@ -2,10 +2,9 @@
 
 # redpine-rs
 
-Redpine is a connection-oriented UDP messaging library for real-time internet
-applications. It supports the delivery of both reliable and unreliable
-datagrams, and allows the application to mitigate the undesirable effects of
-network losses.
+Redpine is a connection-oriented UDP messaging library. It provides automatic
+fragmentation, reliable delivery, congestion avoidance, and robust connection
+management for real-time internet applications.
 
 While the underlying protocol has been developed from scratch, Redpine has an
 event-driven API based on the venerable
@@ -59,7 +58,11 @@ attacks.
 
   * Figure out data-limited congestion-avoidance
 
-  * Document
+  * Expose configuration for stream prioritizer
+
+  * Account for IPv6 header size in maximum frame size
+
+  * Write basic overview
 
   * ???
 
