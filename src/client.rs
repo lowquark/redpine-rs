@@ -20,9 +20,16 @@ const HANDSHAKE_RESEND_TIMEOUT_MS: u64 = 2_000;
 const CONNECTION_TIMEOUT_DEFAULT_MS: u64 = 10_000;
 const CONNECTION_TIMEOUT_MIN_MS: u64 = 2_000;
 
+/// Configuration for a [`Client`] object
 #[derive(Clone)]
 pub struct Config {
+    /// The timeout to use when initiating a connection, in milliseconds \
+    /// Minimum value: 2,000 \
+    /// Default value: 10,000
     pub handshake_timeout_ms: u64,
+    /// The timeout to use when once a connection has been established, in milliseconds \
+    /// Minimum value: 2,000 \
+    /// Default value: 10,000
     pub connection_timeout_ms: u64,
 }
 
@@ -80,11 +87,16 @@ struct Timer {
     timeout_ms: Option<u64>,
 }
 
+/// Represents a client event
 #[derive(Debug)]
 pub enum Event {
+    /// Produced when a connection to the server has been established
     Connect,
+    /// Produced when the connection terminates gracefully
     Disconnect,
+    /// Produced when a packet has been received
     Receive(Box<[u8]>),
+    /// Produced in response to a fatal connection error
     Error(ErrorKind),
 }
 
@@ -107,6 +119,7 @@ struct ClientCore {
     events: VecDeque<Event>,
 }
 
+/// A Redpine client connection
 pub struct Client {
     // Interesting client data
     core: ClientCore,
@@ -479,6 +492,7 @@ impl ClientCore {
 }
 
 impl Client {
+    /// Equivalent to calling [`Client::connect_with_config`] with default configuration.
     pub fn connect<A>(server_addr: A) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
@@ -486,6 +500,9 @@ impl Client {
         Self::connect_with_config(server_addr, Default::default())
     }
 
+    /// Binds a UDP socket to an ephemeral address, initiates a connection to a server at the
+    /// provided address, and returns a new client object. Errors encountered during socket
+    /// initialization are forwarded to the caller.
     pub fn connect_with_config<A>(server_addr: A, config: Config) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
@@ -538,8 +555,7 @@ impl Client {
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts in an attempt to produce an event.
     ///
-    /// Returns `None` if no events are available, or if an error was encountered while reading
-    /// from the internal socket.
+    /// Returns `None` if no events are available.
     pub fn poll_event(&mut self) -> Option<Event> {
         let ref mut core = self.core;
 
@@ -614,26 +630,33 @@ impl Client {
         return core.events.pop_front();
     }
 
+    /// Equivalent to calling [`Client::enqueue`] followed by [`Client::flush`].
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
         self.core.send(packet_bytes, mode);
     }
 
+    /// Enqueues a packet to be sent.
     pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
         self.core.enqueue(packet_bytes, mode);
     }
 
+    /// Sends as much data as possible on the underlying socket.
     pub fn flush(&mut self) {
         self.core.flush();
     }
 
+    /// Disconnects gracefully. No more packets will be sent or received once this function has been
+    /// called.
     pub fn disconnect(&mut self) {
         self.core.disconnect();
     }
 
+    /// Returns the local address of the internal UDP socket.
     pub fn local_addr(&self) -> net::SocketAddr {
         self.socket_rx.local_addr()
     }
 
+    /// Returns the server address for this connection.
     pub fn server_addr(&self) -> net::SocketAddr {
         self.socket_rx.peer_addr()
     }

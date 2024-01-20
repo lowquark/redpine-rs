@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 /*
 
 https://intronetworks.cs.luc.edu/current/html/reno.html
@@ -157,30 +159,46 @@ The counter saturates at user-defined positive and negative values.
 
 */
 
+//! Redpine is a connection-oriented UDP messaging library. It provides automatic fragmentation,
+//! reliable delivery, congestion avoidance, and robust connection management for real-time internet
+//! applications.
+
 mod buffer;
-mod client;
 mod endpoint;
 mod frame;
-mod server;
 mod socket;
 mod timer_wheel;
 
+/// Client-related functionality
+pub mod client;
+/// Server-related functionality
+pub mod server;
+
+/// Modes by which a packet may be sent
 #[derive(Clone, Copy, Debug)]
 pub enum SendMode {
+    /// The packet will be sent and resent until delivered.
     Reliable,
+    /// The packet will be sent once, and may or may not be delievered. If the packet is not sent
+    /// within the provided timeout (in milliseconds), it will be discarded instead.
     Unreliable(u16),
 }
 
+/// Errors which may be signaled by a connection
 #[derive(Debug)]
 pub enum ErrorKind {
+    /// Raised when an active connection or a connection handshake has timed out
     Timeout,
+    /// Raised when a connection could not be established because the server is full
     Capacity,
+    /// Raised when a connection could not be established due to a configuration mismatch
     Parameter,
 }
 
-pub type Client = client::Client;
-pub type ClientConfig = client::Config;
-pub type ClientEvent = client::Event;
-pub type Server = server::Server;
-pub type ServerConfig = server::Config;
-pub type ServerEvent = server::Event;
+pub use client::Client as Client;
+pub use client::Config as ClientConfig;
+pub use client::Event as ClientEvent;
+
+pub use server::Server as Server;
+pub use server::Config as ServerConfig;
+pub use server::Event as ServerEvent;

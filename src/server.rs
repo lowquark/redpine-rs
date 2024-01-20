@@ -40,9 +40,17 @@ const HANDSHAKE_TIMEOUT_MS: u32 = 10_000;
 const CONNECTION_TIMEOUT_DEFAULT_MS: u64 = 10_000;
 const CONNECTION_TIMEOUT_MIN_MS: u64 = 2_000;
 
+/// Configuration for a [`Server`] object
 #[derive(Clone)]
 pub struct Config {
+    /// The maximum number of clients which may be connected at any given time \
+    /// Minimum value: 1 \
+    /// Maximum value: 65,536 \
+    /// Default value: 8
     pub peer_count_max: usize,
+    /// The timeout to use when once a connection has been established, in milliseconds \
+    /// Minimum value: 2,000 \
+    /// Default value: 10,000
     pub connection_timeout_ms: u64,
 }
 
@@ -105,11 +113,16 @@ struct PeerTable {
 
 type TimerWheel = timer_wheel::TimerWheel<PeerRc>;
 
+/// Represents a server event
 #[derive(Debug)]
 pub enum Event {
+    /// Produced when a new client has connected
     Connect(PeerHandle),
+    /// Produced when a connection terminates gracefully
     Disconnect(PeerHandle),
+    /// Produced when a packet has been received
     Receive(PeerHandle, Box<[u8]>),
+    /// Produced in response to a fatal connection error
     Error(PeerHandle, ErrorKind),
 }
 
@@ -141,6 +154,7 @@ struct ServerCore {
 type ServerCoreRc = Rc<RefCell<ServerCore>>;
 type ServerCoreWeak = Weak<RefCell<ServerCore>>;
 
+/// A Redpine server
 pub struct Server {
     // Interesting server data
     core: ServerCoreRc,
@@ -150,6 +164,7 @@ pub struct Server {
     timer_data_buffer: Vec<PeerRc>,
 }
 
+/// Represents a connected client
 pub struct PeerHandle {
     peer: PeerRc,
 }
@@ -609,6 +624,7 @@ impl ServerCore {
 }
 
 impl Server {
+    /// Equivalent to calling [`Server::bind_with_config`] with default configuration.
     pub fn bind<A>(bind_addr: A) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
@@ -616,6 +632,8 @@ impl Server {
         Self::bind_with_config(bind_addr, Default::default())
     }
 
+    /// Binds a UDP socket at the provided address, and returns a new server object. Errors
+    /// encountered during socket initialization are forwarded to the caller.
     pub fn bind_with_config<A>(bind_addr: A, config: Config) -> std::io::Result<Self>
     where
         A: net::ToSocketAddrs,
@@ -664,8 +682,7 @@ impl Server {
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts in an attempt to produce an event.
     ///
-    /// Returns `None` if no events are available, or if an error was encountered while reading
-    /// from the internal socket.
+    /// Returns `None` if no events are available.
     pub fn poll_event(&mut self) -> Option<Event> {
         let ref mut core = *self.core.borrow_mut();
 
@@ -740,10 +757,14 @@ impl Server {
         return core.events.pop_front();
     }
 
+    /// Returns the local address of the internal UDP socket.
     pub fn local_addr(&self) -> net::SocketAddr {
         self.socket_rx.local_addr()
     }
 
+    /// Returns the number of peers in the peer table.
+    ///
+    /// *Note*: Peers may exist in the peer table for some time after they have disconnected.
     pub fn peer_count(&self) -> usize {
         let ref core = *self.core.borrow();
 
@@ -756,10 +777,12 @@ impl PeerHandle {
         Self { peer }
     }
 
+    /// Returns the unique numeric ID assigned to this peer.
     pub fn id(&self) -> PeerId {
         self.peer.borrow().core.id
     }
 
+    /// Equivalent to calling [`PeerHandle::enqueue`] followed by [`PeerHandle::flush`].
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
         let ref mut peer = *self.peer.borrow_mut();
 
@@ -775,6 +798,7 @@ impl PeerHandle {
         }
     }
 
+    /// Enqueues a packet to be sent to this peer.
     pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
         let ref mut peer = *self.peer.borrow_mut();
 
@@ -787,6 +811,7 @@ impl PeerHandle {
         }
     }
 
+    /// Sends as much data as possible for this peer on the underlying socket.
     pub fn flush(&mut self) {
         let ref mut peer = *self.peer.borrow_mut();
 
@@ -801,6 +826,8 @@ impl PeerHandle {
         }
     }
 
+    /// Disconnects this peer gracefully. No more packets will be sent or received once this
+    /// function has been called.
     pub fn disconnect(&mut self) {
         let ref mut peer = *self.peer.borrow_mut();
 
