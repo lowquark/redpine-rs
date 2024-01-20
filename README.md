@@ -12,7 +12,7 @@ event-driven API based on the venerable
 [ENet](https://github.com/lsalzman/enet), and was written based on lessons
 learned during the development of its predecessor,
 [UFlow](https://github.com/lowquark/uflow). In particular, Redpine makes four
-key improvements over UFlow:
+key improvements to UFlow:
 
 ### Event-driven, optionally-blocking implementation
 
@@ -39,10 +39,11 @@ and another containing unreliable packet data. For packets in the unreliable
 queue, the user specifies how long a packet has before it expires.
 
 It is thought that this model is sufficient for the majority of real-time
-internet applications. (Frankly, I couldn't come up with a use case that
-rationalized the complexity of the previous sequencing model.) However,
-channel-oriented methods for mitigating head-of-line blocking in the reliable
-queue are still under consideration.
+internet applications. However, channel-oriented methods for mitigating
+head-of-line blocking in the reliable queue are still under consideration.
+(Frankly, I couldn't come up with a use case that rationalized the complexity
+of the previous sequencing model, considering some amount of application-level
+reordering will always be required.)
 
 ### 4-way, SipHash-validated handshake
 
@@ -55,8 +56,6 @@ preventing address spoofing this way, Redpine is much more resilient to DDoS
 attacks.
 
 # TODO
-
-  * Use CSPRNG when initializing SipHash key
 
   * Implement Nagle's algorithm
 

@@ -626,7 +626,7 @@ impl Server {
 
         let (socket_tx, socket_rx) = socket::new(bind_addr, FRAME_SIZE_MAX)?;
 
-        // XXX TODO: CSPRNG!
+        // This samples the thread-local RNG, which is a CSPRNG (see docs for rand::rngs::StdRng)
         let siphash_key = (0..16)
             .map(|_| rand::random::<u8>())
             .collect::<Vec<_>>()
