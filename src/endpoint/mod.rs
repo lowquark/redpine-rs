@@ -159,6 +159,10 @@ impl FragmentTxBuffers {
         }
     }
 
+    pub fn handle_timeout(&mut self) {
+        self.rel.resend_all();
+    }
+
     pub fn data_ready(&mut self, now_ms: u64) -> bool {
         self.unrel.pop_expired(now_ms);
 
@@ -675,7 +679,8 @@ impl Endpoint {
                     // Notify congestion control of timeout
                     self.cc_state.handle_timeout();
 
-                    // TODO: Reset the reliable fragment tx buffer
+                    // Resend everything in the reliable queue
+                    self.fragment_tx.handle_timeout();
 
                     // Attempt to resynchronize now that the pipe has drained
                     self.send_stream_sync_frame(self.segment_tx.next_id(), ctx);

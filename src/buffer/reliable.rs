@@ -9,7 +9,7 @@ use std::rc::Rc;
 pub struct TxBuffer {
     fragments: VecDeque<FragmentRc>,
     next_send_id: u32,
-    min_ack_id: u32,
+    max_ack_id: u32,
     fragment_size: usize,
     send_window: Window,
     duplicate_ack_count: u32,
@@ -23,7 +23,7 @@ impl TxBuffer {
         Self {
             fragments: VecDeque::new(),
             next_send_id: base_id,
-            min_ack_id: base_id,
+            max_ack_id: base_id,
             fragment_size,
             send_window: Window::new(base_id, window_size),
             duplicate_ack_count: 0,
@@ -89,12 +89,12 @@ impl TxBuffer {
 
                 let fragment_id = self.next_send_id;
 
-                let equal = self.next_send_id == self.min_ack_id;
+                let equal = self.next_send_id == self.max_ack_id;
 
                 self.next_send_id = self.next_send_id.wrapping_add(1);
 
                 if equal {
-                    self.min_ack_id = self.next_send_id;
+                    self.max_ack_id = self.next_send_id;
                 }
 
                 return Some((fragment_id, fragment));
@@ -104,28 +104,39 @@ impl TxBuffer {
         return None;
     }
 
+    pub fn resend_all(&mut self) {
+        self.duplicate_ack_count = 0;
+
+        self.next_send_id = self.send_window.base_id;
+    }
+
     pub fn acknowledge(&mut self, new_base_id: u32) -> bool {
         if new_base_id == self.send_window.base_id {
             // Nothing new was acknowledged, this is a duplicate
 
             self.duplicate_ack_count += 1;
 
-            if self.duplicate_ack_count == 2 {
-                self.duplicate_ack_count = 0;
-
-                self.next_send_id = self.send_window.base_id;
+            if self.duplicate_ack_count == 3 {
+                self.resend_all();
             }
 
             return true;
         } else {
             let new_base_delta = new_base_id.wrapping_sub(self.send_window.base_id);
-            let max_ack_delta = self.min_ack_id.wrapping_sub(self.send_window.base_id);
+            let max_ack_delta = self.max_ack_id.wrapping_sub(self.send_window.base_id);
 
             if new_base_delta <= max_ack_delta {
+                let next_send_delta = self.next_send_id.wrapping_sub(self.send_window.base_id);
+
                 // New fragments have been acknowledged, remove those fragments from the queue and
                 // advance the window
                 self.fragments.drain(0..new_base_delta as usize);
                 self.send_window.base_id = new_base_id;
+
+                // If we were resending, start with new base ID
+                if new_base_delta > next_send_delta {
+                    self.next_send_id = new_base_id;
+                }
 
                 self.duplicate_ack_count = 0;
 
@@ -508,7 +519,7 @@ mod tests {
     fn resend_trial(initial_base_id: u32, window_size: u32) {
         const FRAGMENT_SIZE: usize = 8;
 
-        for send_count in 0..=window_size {
+        for send_count in 1..=window_size {
             let mut send_buf = TxBuffer::new(initial_base_id, FRAGMENT_SIZE, window_size);
 
             // Start with a filled send window
@@ -521,11 +532,20 @@ mod tests {
                 expect_pop_basic(&mut send_buf, initial_base_id.wrapping_add(i));
             }
 
-            // Triple-acknowledge first sent packet (implicitly acked to begin with)
+            // Signal three duplicate acknowledgements (implicitly acked to begin with)
+            send_buf.acknowledge(initial_base_id);
             send_buf.acknowledge(initial_base_id);
             send_buf.acknowledge(initial_base_id);
 
             // A resend should have been triggered, test that each sent packet is resent
+            // sequentially
+            for i in 0..send_count {
+                expect_pop_basic(&mut send_buf, initial_base_id.wrapping_add(i));
+            }
+
+            // Do it again
+            send_buf.resend_all();
+
             for i in 0..send_count {
                 expect_pop_basic(&mut send_buf, initial_base_id.wrapping_add(i));
             }
@@ -541,6 +561,48 @@ mod tests {
 
         for _ in 0..=ID_SWEEP_SIZE {
             resend_trial(initial_base_id, WINDOW_SIZE);
+            initial_base_id = initial_base_id.wrapping_add(1);
+        }
+    }
+
+    fn resend_resync_trial(initial_base_id: u32, window_size: u32) {
+        const FRAGMENT_SIZE: usize = 8;
+
+        for send_count in 1..=window_size {
+            let mut send_buf = TxBuffer::new(initial_base_id, FRAGMENT_SIZE, window_size);
+
+            // Start with a filled send window
+            for i in 0..window_size {
+                push_basic(&mut send_buf, initial_base_id.wrapping_add(i));
+            }
+
+            // Tx some fragments
+            for i in 0..send_count {
+                expect_pop_basic(&mut send_buf, initial_base_id.wrapping_add(i));
+            }
+
+            // Trigger a resend with three duplicate acknowledgements
+            send_buf.acknowledge(initial_base_id);
+            send_buf.acknowledge(initial_base_id);
+            send_buf.acknowledge(initial_base_id);
+
+            // Test that receiving a future acknowledgement advances the current resend
+            for i in 1..send_count {
+                send_buf.acknowledge(initial_base_id.wrapping_add(i));
+                expect_pop_basic(&mut send_buf, initial_base_id.wrapping_add(i));
+            }
+        }
+    }
+
+    #[test]
+    fn resend_resync() {
+        const WINDOW_SIZE: u32 = 16;
+        const ID_SWEEP_SIZE: u32 = WINDOW_SIZE;
+
+        let mut initial_base_id = 0_u32.wrapping_sub(ID_SWEEP_SIZE);
+
+        for _ in 0..=ID_SWEEP_SIZE {
+            resend_resync_trial(initial_base_id, WINDOW_SIZE);
             initial_base_id = initial_base_id.wrapping_add(1);
         }
     }
