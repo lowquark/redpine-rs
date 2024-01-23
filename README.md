@@ -56,14 +56,12 @@ attacks.
 
 # TODO
 
+  * Expose channel configuration
+
+  * Account for IPv6 header size in MTU
+
+  * Expose configuration for MTU
+
   * Figure out data-limited congestion-avoidance
 
-  * Expose configuration for stream prioritizer
-
-  * Account for IPv6 header size in maximum frame size
-
-  * Write basic overview
-
-  * ???
-
-  * Publish
+  * Add overview to documentation
