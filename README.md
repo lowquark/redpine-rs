@@ -56,8 +56,6 @@ attacks.
 
 # TODO
 
-  * Expose channel configuration
-
   * Account for IPv6 header size in MTU
 
   * Expose configuration for MTU
