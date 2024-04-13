@@ -28,34 +28,34 @@ const K: f32 = 4.0;
 pub struct ChannelBalanceConfig {
     /// Relative weight with which to send unreliable packets.
     ///
-    /// *Note*: The product of weights may not exceed 256
-    /// ([CHANNEL_WEIGHT_MAX](crate::CHANNEL_WEIGHT_MAX)).
-    ///
     /// Minimum value: 1 \
     /// Maximum value: 256 \
     /// Default value: 1
+    ///
+    /// *Note*: The product of weights may not exceed 256
+    /// ([CHANNEL_WEIGHT_MAX](crate::CHANNEL_WEIGHT_MAX)).
     pub unreliable_weight: u32,
 
     /// Relative weight with which to send reliable packets.
     ///
-    /// *Note*: The product of weights may not exceed 256
-    /// ([CHANNEL_WEIGHT_MAX](crate::CHANNEL_WEIGHT_MAX)).
-    ///
     /// Minimum value: 1 \
     /// Maximum value: 256 \
     /// Default value: 1
+    ///
+    /// *Note*: The product of weights may not exceed 256
+    /// ([CHANNEL_WEIGHT_MAX](crate::CHANNEL_WEIGHT_MAX)).
     pub reliable_weight: u32,
 
     /// Defines the maximum amount of data sent by a channel after an idle period. If a channel has
     /// a weight of 2, it may send 2 times this value in a burst, and so on.
     ///
+    /// Minimum value: 1 \
+    /// Maximum value: 65535 * 255 ([CHANNEL_BURST_SIZE_MAX](crate::CHANNEL_BURST_SIZE_MAX)) \
+    /// Default value: 10_000
+    ///
     /// *Note*: This value determines the time horizon over which channels are prioritized. If this
     /// value is too low, all channels will send with an effectively equal weight. If this value is
     /// too high, an idle channel will dominate the stream once it resumes sending.
-    ///
-    /// Minimum value: 1 \
-    /// Maximum value: 65535 * 255 [CHANNEL_BURST_SIZE_MAX](crate::CHANNEL_BURST_SIZE_MAX) \
-    /// Default value: 10_000
     pub burst_size: usize,
 }
 
