@@ -20,17 +20,23 @@ const HANDSHAKE_RESEND_TIMEOUT_MS: u64 = 2_000;
 const CONNECTION_TIMEOUT_DEFAULT_MS: u64 = 10_000;
 const CONNECTION_TIMEOUT_MIN_MS: u64 = 2_000;
 
-/// Configuration for a [`Client`] object
+/// Configuration for a [`Client`] object.
 #[derive(Clone)]
 pub struct Config {
-    /// The timeout to use when initiating a connection, in milliseconds \
+    /// Timeout to use when initiating a connection, in milliseconds.
+    ///
     /// Minimum value: 2,000 \
     /// Default value: 10,000
     pub handshake_timeout_ms: u64,
-    /// The timeout to use when once a connection has been established, in milliseconds \
+
+    /// Timeout to use when once a connection has been established, in milliseconds.
+    ///
     /// Minimum value: 2,000 \
     /// Default value: 10,000
     pub connection_timeout_ms: u64,
+
+    /// Configuration for unreliable / reliable channel prioritization.
+    pub channel_balance: endpoint::ChannelBalanceConfig,
 }
 
 impl Default for Config {
@@ -38,6 +44,7 @@ impl Default for Config {
         Self {
             handshake_timeout_ms: HANDSHAKE_TIMEOUT_DEFAULT_MS,
             connection_timeout_ms: CONNECTION_TIMEOUT_DEFAULT_MS,
+            channel_balance: Default::default(),
         }
     }
 }
@@ -54,6 +61,8 @@ impl Config {
             "invalid client configuration: connection_timeout_ms < {}",
             CONNECTION_TIMEOUT_MIN_MS
         );
+
+        self.channel_balance.validate();
     }
 }
 
@@ -87,16 +96,16 @@ struct Timer {
     timeout_ms: Option<u64>,
 }
 
-/// Represents a client event
+/// Represents a client event.
 #[derive(Debug)]
 pub enum Event {
-    /// Produced when a connection to the server has been established
+    /// Produced when a connection to the server has been established.
     Connect,
-    /// Produced when the connection terminates gracefully
+    /// Produced when the connection terminates gracefully.
     Disconnect,
-    /// Produced when a packet has been received
+    /// Produced when a packet has been received.
     Receive(Box<[u8]>),
-    /// Produced in response to a fatal connection error
+    /// Produced in response to a fatal connection error.
     Error(ErrorKind),
 }
 
@@ -119,7 +128,7 @@ struct ClientCore {
     events: VecDeque<Event>,
 }
 
-/// A Redpine client connection
+/// A Redpine client connection.
 pub struct Client {
     // Interesting client data
     core: ClientCore,
@@ -302,6 +311,7 @@ impl ClientCore {
                                     // Create an endpoint now that we're connected
                                     let endpoint_config = endpoint::Config {
                                         timeout_time_ms: self.config.connection_timeout_ms,
+                                        prio_config: self.config.channel_balance.clone().into(),
                                     };
 
                                     let endpoint = endpoint::Endpoint::new(endpoint_config);

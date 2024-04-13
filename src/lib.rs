@@ -168,12 +168,12 @@ mod frame;
 mod socket;
 mod timer_wheel;
 
-/// Client-related functionality
+/// Client-related functionality.
 pub mod client;
-/// Server-related functionality
+/// Server-related functionality.
 pub mod server;
 
-/// Modes by which a packet may be sent
+/// Mode / channel by which a packet may be sent.
 #[derive(Clone, Copy, Debug)]
 pub enum SendMode {
     /// The packet will be sent and resent until delivered.
@@ -183,16 +183,20 @@ pub enum SendMode {
     Unreliable(u16),
 }
 
-/// Errors which may be signaled by a connection
+/// Errors which may be signaled by a connection.
 #[derive(Debug)]
 pub enum ErrorKind {
-    /// Raised when an active connection or a connection handshake has timed out
+    /// Raised when an active connection or a connection handshake has timed out.
     Timeout,
-    /// Raised when a connection could not be established because the server is full
+    /// Raised when a connection could not be established because the server is full.
     Capacity,
-    /// Raised when a connection could not be established due to a configuration mismatch
+    /// Raised when a connection could not be established due to a configuration mismatch.
     Parameter,
 }
+
+pub use endpoint::prio::BURST_SIZE_MAX as CHANNEL_BURST_SIZE_MAX;
+pub use endpoint::prio::WEIGHT_MAX as CHANNEL_WEIGHT_MAX;
+pub use endpoint::ChannelBalanceConfig;
 
 pub use client::Client;
 pub use client::Config as ClientConfig;

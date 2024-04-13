@@ -3,7 +3,7 @@ use super::frame;
 use super::SendMode;
 
 mod cc;
-mod prio;
+pub mod prio;
 mod segment_rx;
 mod segment_tx;
 
@@ -14,9 +14,6 @@ const SEGMENT_WINDOW_SIZE: u32 = 4096;
 const FRAGMENT_SIZE: usize = 1024;
 const FRAGMENT_WINDOW_SIZE: u32 = 4096;
 
-const PRIO_WEIGHTS: &[u32; prio::CHANNEL_COUNT] = &[1, 1, 1, 1];
-const PRIO_BURST_SIZE: usize = 10_000;
-
 const RTO_INITIAL_MS: u64 = 1_000;
 const RTO_MAX_MS: u64 = 60_000;
 const RTO_MIN_MS: u64 = 1_000;
@@ -26,9 +23,72 @@ const BETA: f32 = 0.25;
 const G_MS: f32 = 4.0;
 const K: f32 = 4.0;
 
+/// Parameters for unreliable / reliable channel prioritization.
+#[derive(Clone)]
+pub struct ChannelBalanceConfig {
+    /// Relative weight with which to send unreliable packets.
+    ///
+    /// *Note*: The product of weights may not exceed 256
+    /// ([CHANNEL_WEIGHT_MAX](crate::CHANNEL_WEIGHT_MAX)).
+    ///
+    /// Minimum value: 1 \
+    /// Maximum value: 256 \
+    /// Default value: 1
+    pub unreliable_weight: u32,
+
+    /// Relative weight with which to send reliable packets.
+    ///
+    /// *Note*: The product of weights may not exceed 256
+    /// ([CHANNEL_WEIGHT_MAX](crate::CHANNEL_WEIGHT_MAX)).
+    ///
+    /// Minimum value: 1 \
+    /// Maximum value: 256 \
+    /// Default value: 1
+    pub reliable_weight: u32,
+
+    /// Defines the maximum amount of data sent by a channel after an idle period. If a channel has
+    /// a weight of 2, it may send 2 times this value in a burst, and so on.
+    ///
+    /// *Note*: This value determines the time horizon over which channels are prioritized. If this
+    /// value is too low, all channels will send with an effectively equal weight. If this value is
+    /// too high, an idle channel will dominate the stream once it resumes sending.
+    ///
+    /// Minimum value: 1 \
+    /// Maximum value: 65535 * 255 [CHANNEL_BURST_SIZE_MAX](crate::CHANNEL_BURST_SIZE_MAX) \
+    /// Default value: 10_000
+    pub burst_size: usize,
+}
+
+impl ChannelBalanceConfig {
+    pub(super) fn validate(&self) {
+        // Hackily construct the underlying config type, which performs its own assertions
+        let _: prio::Config = self.clone().into();
+    }
+}
+
+impl Into<prio::Config> for ChannelBalanceConfig {
+    fn into(self) -> prio::Config {
+        prio::Config::new(
+            &[self.unreliable_weight, self.reliable_weight, 1, 1],
+            self.burst_size,
+        )
+    }
+}
+
+impl Default for ChannelBalanceConfig {
+    fn default() -> Self {
+        Self {
+            unreliable_weight: 1,
+            reliable_weight: 1,
+            burst_size: 10_000,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub timeout_time_ms: u64,
+    pub prio_config: prio::Config,
 }
 
 pub trait HostContext {
@@ -64,9 +124,12 @@ struct FragmentTxBuffers {
 }
 
 impl FragmentTxBuffers {
-    pub fn new(window_base_id: u32, window_size: u32, fragment_size: usize) -> Self {
-        let prio_config = prio::Config::new(PRIO_WEIGHTS, PRIO_BURST_SIZE);
-
+    pub fn new(
+        window_base_id: u32,
+        window_size: u32,
+        fragment_size: usize,
+        prio_config: prio::Config,
+    ) -> Self {
         Self {
             unrel: buffer::UnreliableTxBuffer::new(window_base_id, fragment_size),
             rel: buffer::ReliableTxBuffer::new(window_base_id, fragment_size, window_size),
@@ -224,13 +287,20 @@ impl Endpoint {
         let local_nonce = 0;
         let remote_nonce = 0;
 
+        let prio_config = config.prio_config.clone();
+
         Self {
             config,
             state_id: StateId::PreInit,
             local_nonce,
             remote_nonce,
             segment_tx: segment_tx::SegmentTx::new(0, SEGMENT_WINDOW_SIZE),
-            fragment_tx: FragmentTxBuffers::new(0, FRAGMENT_WINDOW_SIZE, FRAGMENT_SIZE),
+            fragment_tx: FragmentTxBuffers::new(
+                0,
+                FRAGMENT_WINDOW_SIZE,
+                FRAGMENT_SIZE,
+                prio_config,
+            ),
             cc_state: cc::AimdReno::new(FRAGMENT_SIZE),
             tx_buffer: vec![0; FRAME_SIZE_MAX].into_boxed_slice(),
             rto_ms: RTO_INITIAL_MS,
@@ -875,6 +945,7 @@ mod tests {
         let mut host_ctx = MockHostContext::new();
         let config = Config {
             timeout_time_ms: 10_000,
+            prio_config: prio::Config::new(&[1, 1, 1, 1], 10_000),
         };
         let mut endpoint = Endpoint::new(config);
 

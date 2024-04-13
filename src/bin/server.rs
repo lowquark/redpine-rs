@@ -4,6 +4,7 @@ fn main() {
     let config = redpine::ServerConfig {
         peer_count_max: 1,
         connection_timeout_ms: 4_000,
+        ..Default::default()
     };
 
     let mut server = redpine::Server::bind_with_config(("127.0.0.1", 8888), config)

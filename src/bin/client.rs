@@ -4,6 +4,7 @@ fn main() {
     let config = redpine::ClientConfig {
         handshake_timeout_ms: 4_000,
         connection_timeout_ms: 4_000,
+        ..Default::default()
     };
 
     let mut client = redpine::Client::connect_with_config(("127.0.0.1", 8888), config)

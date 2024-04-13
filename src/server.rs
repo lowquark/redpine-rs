@@ -40,18 +40,24 @@ const HANDSHAKE_TIMEOUT_MS: u32 = 10_000;
 const CONNECTION_TIMEOUT_DEFAULT_MS: u64 = 10_000;
 const CONNECTION_TIMEOUT_MIN_MS: u64 = 2_000;
 
-/// Configuration for a [`Server`] object
+/// Configuration for a [`Server`] object.
 #[derive(Clone)]
 pub struct Config {
-    /// The maximum number of clients which may be connected at any given time \
+    /// Maximum number of clients which may be connected at any given time.
+    ///
     /// Minimum value: 1 \
     /// Maximum value: 65,536 \
     /// Default value: 8
     pub peer_count_max: usize,
-    /// The timeout to use when once a connection has been established, in milliseconds \
+
+    /// Timeout to use when once a connection has been established, in milliseconds.
+    ///
     /// Minimum value: 2,000 \
     /// Default value: 10,000
     pub connection_timeout_ms: u64,
+
+    /// Configuration for unreliable / reliable channel prioritization.
+    pub channel_balance: endpoint::ChannelBalanceConfig,
 }
 
 impl Default for Config {
@@ -59,6 +65,7 @@ impl Default for Config {
         Self {
             peer_count_max: PEER_COUNT_MAX_DEFAULT,
             connection_timeout_ms: CONNECTION_TIMEOUT_DEFAULT_MS,
+            channel_balance: Default::default(),
         }
     }
 }
@@ -79,6 +86,8 @@ impl Config {
             "invalid server configuration: connection_timeout_ms < {}",
             CONNECTION_TIMEOUT_MIN_MS
         );
+
+        self.channel_balance.validate();
     }
 }
 
@@ -113,16 +122,16 @@ struct PeerTable {
 
 type TimerWheel = timer_wheel::TimerWheel<PeerRc>;
 
-/// Represents a server event
+/// Represents a server event.
 #[derive(Debug)]
 pub enum Event {
-    /// Produced when a new client has connected
+    /// Produced when a new client has connected.
     Connect(PeerHandle),
-    /// Produced when a connection terminates gracefully
+    /// Produced when a connection terminates gracefully.
     Disconnect(PeerHandle),
-    /// Produced when a packet has been received
+    /// Produced when a packet has been received.
     Receive(PeerHandle, Box<[u8]>),
-    /// Produced in response to a fatal connection error
+    /// Produced in response to a fatal connection error.
     Error(PeerHandle, ErrorKind),
 }
 
@@ -154,7 +163,7 @@ struct ServerCore {
 type ServerCoreRc = Rc<RefCell<ServerCore>>;
 type ServerCoreWeak = Weak<RefCell<ServerCore>>;
 
-/// A Redpine server
+/// A Redpine server.
 pub struct Server {
     // Interesting server data
     core: ServerCoreRc,
@@ -164,7 +173,7 @@ pub struct Server {
     timer_data_buffer: Vec<PeerRc>,
 }
 
-/// Represents a connected client
+/// Represents a connected client.
 pub struct PeerHandle {
     peer: PeerRc,
 }
@@ -500,6 +509,7 @@ impl ServerCore {
                 } else {
                     let endpoint_config = endpoint::Config {
                         timeout_time_ms: self.config.connection_timeout_ms,
+                        prio_config: self.config.channel_balance.clone().into(),
                     };
 
                     let peer_rc =

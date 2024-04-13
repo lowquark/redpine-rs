@@ -1,8 +1,11 @@
 pub const CHANNEL_COUNT: usize = 4;
 pub const DATA_SIZE_MAX: usize = u16::MAX as usize;
+/// Maximum value for burst size setting.
 pub const BURST_SIZE_MAX: usize = DATA_SIZE_MAX * 255;
+/// Maximum value for channel weight.
 pub const WEIGHT_MAX: u32 = 256;
 
+#[derive(Clone)]
 pub struct Config {
     weights: [u32; CHANNEL_COUNT],
     counter_max: u32,
