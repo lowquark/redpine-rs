@@ -1,5 +1,4 @@
 #![warn(missing_docs)]
-
 /*
 
 https://intronetworks.cs.luc.edu/current/html/reno.html
@@ -195,10 +194,10 @@ pub enum ErrorKind {
     Parameter,
 }
 
-pub use client::Client as Client;
+pub use client::Client;
 pub use client::Config as ClientConfig;
 pub use client::Event as ClientEvent;
 
-pub use server::Server as Server;
 pub use server::Config as ServerConfig;
 pub use server::Event as ServerEvent;
+pub use server::Server;

@@ -9,7 +9,7 @@ pub struct Config {
 }
 
 impl Config {
-    fn new(weights: &[u32; CHANNEL_COUNT], burst_size: usize) -> Self {
+    pub fn new(weights: &[u32; CHANNEL_COUNT], burst_size: usize) -> Self {
         for w in weights.iter() {
             assert!(*w != 0, "weights must not be zero (found: {w})");
             assert!(
@@ -56,7 +56,7 @@ pub struct Prio {
 }
 
 impl Prio {
-    fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Self {
         Self {
             counters: [0, 0, 0, 0],
             weights: config.weights,
@@ -64,7 +64,7 @@ impl Prio {
         }
     }
 
-    fn next(&self, ch0: bool, ch1: bool, ch2: bool, ch3: bool) -> Option<u8> {
+    pub fn next(&self, ch0: bool, ch1: bool, ch2: bool, ch3: bool) -> Option<u8> {
         let mut min_chan = None;
         let mut min_val = 0;
         let mut set = false;
@@ -94,7 +94,7 @@ impl Prio {
         return min_chan;
     }
 
-    fn send(&mut self, channel_idx: u8, data_size: usize) {
+    pub fn mark_sent(&mut self, channel_idx: u8, data_size: usize) {
         debug_assert!(channel_idx < CHANNEL_COUNT as u8);
         debug_assert!(data_size <= DATA_SIZE_MAX);
 
@@ -132,12 +132,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn single_channels() {
+        let config = Config::new(&[1, 1, 2, 8], 10);
+        let prio = Prio::new(config);
+
+        let result = prio.next(true, false, false, false);
+        assert_eq!(result, Some(0));
+
+        let result = prio.next(false, true, false, false);
+        assert_eq!(result, Some(1));
+
+        let result = prio.next(false, false, true, false);
+        assert_eq!(result, Some(2));
+
+        let result = prio.next(false, false, false, true);
+        assert_eq!(result, Some(3));
+
+        let result = prio.next(false, false, false, false);
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn simple() {
         let config = Config::new(&[1, 1, 2, 8], 10);
-        let mut values = Prio::new(config);
+        let mut prio = Prio::new(config);
 
         for i in 0..20 {
-            let next = values.next(true, true, false, false).unwrap();
+            let next = prio.next(true, true, false, false).unwrap();
 
             if i % 2 == 0 {
                 assert_eq!(next, 0);
@@ -145,7 +166,7 @@ mod tests {
                 assert_eq!(next, 1);
             }
 
-            values.send(next, 1);
+            prio.mark_sent(next, 1);
         }
     }
 
@@ -156,9 +177,9 @@ mod tests {
         let counter_max = weight * weight * weight * weight * burst_size as u32;
 
         let config = Config::new(&[weight, weight, weight, weight], burst_size);
-        let mut values = Prio::new(config);
+        let mut prio = Prio::new(config);
 
-        assert_eq!(values.counter_max, counter_max);
+        assert_eq!(prio.counter_max, counter_max);
 
         // Send enough data to saturate each channel. Channels will send their weight * burst size
         // before saturating.
@@ -168,17 +189,17 @@ mod tests {
         let send_count = weight * (CHANNEL_COUNT as u32) * 255;
 
         for _ in 0..send_count {
-            values.send(values.next(true, true, true, true).unwrap(), DATA_SIZE_MAX);
+            prio.mark_sent(prio.next(true, true, true, true).unwrap(), DATA_SIZE_MAX);
         }
 
-        assert_eq!(values.counters[0], counter_max);
+        assert_eq!(prio.counters[0], counter_max);
 
         // Steady state should be reached now
 
         for _ in 0..CHANNEL_COUNT {
-            values.send(values.next(true, true, true, true).unwrap(), DATA_SIZE_MAX);
+            prio.mark_sent(prio.next(true, true, true, true).unwrap(), DATA_SIZE_MAX);
         }
 
-        assert_eq!(values.counters[0], counter_max);
+        assert_eq!(prio.counters[0], counter_max);
     }
 }

@@ -14,11 +14,8 @@ const SEGMENT_WINDOW_SIZE: u32 = 4096;
 const FRAGMENT_SIZE: usize = 1024;
 const FRAGMENT_WINDOW_SIZE: u32 = 4096;
 
-const PRIO_RELIABLE_WEIGHT: u8 = 1;
-const PRIO_RELIABLE_SATURATION: i32 = 10_000;
-const PRIO_UNRELIABLE_WEIGHT: u8 = 1;
-const PRIO_UNRELIABLE_SATURATION: i32 = 10_000;
-const PRIO_SATURATION_MAX: i32 = 1_000_000;
+const PRIO_WEIGHTS: &[u32; prio::CHANNEL_COUNT] = &[1, 1, 1, 1];
+const PRIO_BURST_SIZE: usize = 10_000;
 
 const RTO_INITIAL_MS: u64 = 1_000;
 const RTO_MAX_MS: u64 = 60_000;
@@ -60,83 +57,20 @@ pub trait HostContext {
     fn on_timeout(&mut self);
 }
 
-struct TxPrioState {
-    counter: i32,
-    w_r: u8,
-    w_u: u8,
-    sat_r: i32,
-    sat_u: i32,
-}
-
-#[derive(PartialEq)]
-enum SendModeType {
-    Unreliable,
-    Reliable,
-}
-
-impl TxPrioState {
-    pub fn new(w_r: u8, w_u: u8, sat_r: i32, sat_u: i32) -> Self {
-        assert!(w_r != 0);
-        assert!(w_u != 0);
-
-        assert!(sat_r > 0 && sat_r <= PRIO_SATURATION_MAX);
-        assert!(sat_u > 0 && sat_u <= PRIO_SATURATION_MAX);
-
-        Self {
-            counter: 0,
-            w_r,
-            w_u,
-            sat_r,
-            sat_u,
-        }
-    }
-
-    pub fn next_mode(&self) -> SendModeType {
-        if self.counter >= 0 {
-            SendModeType::Unreliable
-        } else {
-            SendModeType::Reliable
-        }
-    }
-
-    pub fn mark_sent(&mut self, size: usize) {
-        if self.counter >= 0 {
-            self.counter = self
-                .counter
-                .saturating_sub(i32::try_from(size * usize::from(self.w_r)).unwrap());
-
-            if self.counter < -self.sat_r {
-                self.counter = -self.sat_r;
-            }
-        } else {
-            self.counter = self
-                .counter
-                .saturating_add(i32::try_from(size * usize::from(self.w_u)).unwrap());
-
-            if self.counter > self.sat_u {
-                self.counter = self.sat_u;
-            }
-        }
-    }
-}
-
 struct FragmentTxBuffers {
     unrel: buffer::UnreliableTxBuffer,
     rel: buffer::ReliableTxBuffer,
-    prio_state: TxPrioState,
+    prio: prio::Prio,
 }
 
 impl FragmentTxBuffers {
     pub fn new(window_base_id: u32, window_size: u32, fragment_size: usize) -> Self {
+        let prio_config = prio::Config::new(PRIO_WEIGHTS, PRIO_BURST_SIZE);
+
         Self {
             unrel: buffer::UnreliableTxBuffer::new(window_base_id, fragment_size),
             rel: buffer::ReliableTxBuffer::new(window_base_id, fragment_size, window_size),
-            prio_state: TxPrioState::new(
-                PRIO_RELIABLE_WEIGHT,
-                PRIO_UNRELIABLE_WEIGHT,
-                PRIO_RELIABLE_SATURATION,
-                PRIO_UNRELIABLE_SATURATION,
-            ),
+            prio: prio::Prio::new(prio_config),
         }
     }
 
@@ -179,44 +113,48 @@ impl FragmentTxBuffers {
             let unrel_next = self.unrel.peek_sendable();
             let rel_next = self.rel.peek_sendable();
 
-            let (mode, next) = if unrel_next.is_some() && rel_next.is_some() {
-                match self.prio_state.next_mode() {
-                    SendModeType::Unreliable => (SendModeType::Unreliable, unrel_next),
-                    SendModeType::Reliable => (SendModeType::Reliable, rel_next),
-                }
-            } else if unrel_next.is_some() {
-                (SendModeType::Unreliable, unrel_next)
-            } else if rel_next.is_some() {
-                (SendModeType::Reliable, rel_next)
-            } else {
-                break;
-            };
+            let next_channel_idx =
+                self.prio
+                    .next(unrel_next.is_some(), rel_next.is_some(), false, false);
 
-            let (id, fragment) = next.unwrap();
+            if let Some(channel_idx) = next_channel_idx {
+                let next = match channel_idx {
+                    0 => unrel_next,
+                    1 => rel_next,
+                    _ => panic!("NANI?"),
+                };
 
-            let datagram = frame::Datagram {
-                id,
-                unrel: mode == SendModeType::Unreliable,
-                first: fragment.first,
-                last: fragment.last,
-                data: &fragment.data[fragment.data_range.clone()],
-            };
+                let (id, fragment) = next.unwrap();
 
-            if writer.write(&datagram) {
-                let data_size = datagram.data.len();
+                let datagram = frame::Datagram {
+                    id,
+                    unrel: channel_idx == 0,
+                    first: fragment.first,
+                    last: fragment.last,
+                    data: &fragment.data[fragment.data_range.clone()],
+                };
 
-                self.prio_state.mark_sent(data_size);
-                data_size_total += data_size;
+                if writer.write(&datagram) {
+                    let data_size = datagram.data.len();
 
-                match mode {
-                    SendModeType::Unreliable => {
-                        self.unrel.pop_sendable().expect("NANI?");
+                    self.prio.mark_sent(channel_idx, data_size);
+                    data_size_total += data_size;
+
+                    match channel_idx {
+                        0 => {
+                            self.unrel.pop_sendable().expect("NANI?");
+                        }
+                        1 => {
+                            self.rel.pop_sendable().expect("NANI?");
+                        }
+                        _ => panic!("NANI?"),
                     }
-                    SendModeType::Reliable => {
-                        self.rel.pop_sendable().expect("NANI?");
-                    }
+                } else {
+                    // No more datagrams can be written
+                    break;
                 }
             } else {
+                // No more data to send
                 break;
             }
         }
