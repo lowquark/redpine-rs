@@ -3,6 +3,7 @@ use super::frame;
 use super::SendMode;
 
 mod cc;
+mod prio;
 mod segment_rx;
 mod segment_tx;
 
