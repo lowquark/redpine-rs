@@ -1,17 +1,17 @@
 use std::net;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time;
 
 const SOCKET_POLLING_KEY: usize = 0;
 
 pub struct SocketTx {
     // Reference to non-blocking server socket
-    socket: Rc<net::UdpSocket>,
+    socket: Arc<net::UdpSocket>,
 }
 
 pub struct SocketRx {
     // Reference to non-blocking server socket
-    socket: Rc<net::UdpSocket>,
+    socket: Arc<net::UdpSocket>,
     // Cached from socket initialization
     local_addr: net::SocketAddr,
     // Polling objects
@@ -23,12 +23,12 @@ pub struct SocketRx {
 
 pub struct ConnectedSocketTx {
     // Reference to non-blocking server socket
-    socket: Rc<net::UdpSocket>,
+    socket: Arc<net::UdpSocket>,
 }
 
 pub struct ConnectedSocketRx {
     // Reference to non-blocking server socket
-    socket: Rc<net::UdpSocket>,
+    socket: Arc<net::UdpSocket>,
     // Cached from socket initialization
     local_addr: net::SocketAddr,
     peer_addr: net::SocketAddr,
@@ -107,10 +107,10 @@ where
         poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
     }
 
-    let socket_rc = Rc::new(socket);
+    let socket_rc = Arc::new(socket);
 
     let tx = SocketTx {
-        socket: Rc::clone(&socket_rc),
+        socket: Arc::clone(&socket_rc),
     };
 
     let rx = SocketRx {
@@ -201,10 +201,10 @@ where
         poller.add(&socket, polling::Event::readable(SOCKET_POLLING_KEY))?;
     }
 
-    let socket_rc = Rc::new(socket);
+    let socket_rc = Arc::new(socket);
 
     let tx = ConnectedSocketTx {
-        socket: Rc::clone(&socket_rc),
+        socket: Arc::clone(&socket_rc),
     };
 
     let rx = ConnectedSocketRx {

@@ -3,7 +3,7 @@ use super::FragmentRef;
 use super::Window;
 
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct TxBuffer {
@@ -37,7 +37,7 @@ impl TxBuffer {
         let mut index = 0;
         let mut first = true;
 
-        let packet_rc = Rc::new(packet);
+        let packet_rc = Arc::new(packet);
 
         while bytes_remaining > self.fragment_size {
             let data_range = index..index + self.fragment_size;
@@ -45,7 +45,7 @@ impl TxBuffer {
             self.fragments.push_back(FragmentRc {
                 first,
                 last: false,
-                data: Rc::clone(&packet_rc),
+                data: Arc::clone(&packet_rc),
                 data_range,
             });
 
@@ -219,7 +219,6 @@ impl RxBuffer {
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
-    use std::rc::Rc;
 
     use super::*;
 
@@ -253,7 +252,7 @@ mod tests {
     }
 
     fn expect_pop_basic(send_buf: &mut TxBuffer, id: u32) {
-        let packet_data = Rc::new(
+        let packet_data = Arc::new(
             vec![
                 (id >> 24) as u8,
                 (id >> 16) as u8,
@@ -304,7 +303,7 @@ mod tests {
         // Enqueue a single packet
         send_buf.push(packet_data.clone());
 
-        let packet_data_rc = Rc::new(packet_data.clone());
+        let packet_data_rc = Arc::new(packet_data.clone());
 
         // Test the ranges and IDs of resulting fragments
         for (idx, range) in ranges.iter().enumerate() {
@@ -317,7 +316,7 @@ mod tests {
                 FragmentRc {
                     first: idx == 0,
                     last: idx == ranges.len() - 1,
-                    data: Rc::clone(&packet_data_rc),
+                    data: Arc::clone(&packet_data_rc),
                     data_range: range.clone(),
                 }
             );

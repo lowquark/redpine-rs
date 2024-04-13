@@ -1,9 +1,8 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt;
 use std::net;
-use std::rc::{Rc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 use std::time;
 
 use siphasher::sip;
@@ -111,16 +110,16 @@ struct Peer {
     server_weak: ServerCoreWeak,
 }
 
-type PeerRc = Rc<RefCell<Peer>>;
+type PeerRef = Arc<RwLock<Peer>>;
 
 struct PeerTable {
     // Mapping from sender address to peer
-    peers: HashMap<net::SocketAddr, (PeerId, PeerRc)>,
+    peers: HashMap<net::SocketAddr, (PeerId, PeerRef)>,
     // Stack of unused IDs
     free_ids: Vec<PeerId>,
 }
 
-type TimerWheel = timer_wheel::TimerWheel<PeerRc>;
+type TimerWheel = timer_wheel::TimerWheel<PeerRef>;
 
 /// Represents a server event.
 #[derive(Debug)]
@@ -138,7 +137,7 @@ pub enum Event {
 struct EndpointContext<'a> {
     server: &'a mut ServerCore,
     peer: &'a mut PeerCore,
-    peer_rc: &'a PeerRc,
+    peer_ref: &'a PeerRef,
 }
 
 struct ServerCore {
@@ -160,22 +159,22 @@ struct ServerCore {
     self_weak: ServerCoreWeak,
 }
 
-type ServerCoreRc = Rc<RefCell<ServerCore>>;
-type ServerCoreWeak = Weak<RefCell<ServerCore>>;
+type ServerCoreRef = Arc<RwLock<ServerCore>>;
+type ServerCoreWeak = Weak<RwLock<ServerCore>>;
 
 /// A Redpine server.
 pub struct Server {
     // Interesting server data
-    core: ServerCoreRc,
+    core: ServerCoreRef,
     // Socket receive handle
     socket_rx: socket::SocketRx,
     // Always-allocated timer expiration buffer
-    timer_data_buffer: Vec<PeerRc>,
+    timer_data_buffer: Vec<PeerRef>,
 }
 
 /// Represents a connected client.
 pub struct PeerHandle {
-    peer: PeerRc,
+    peer: PeerRef,
 }
 
 impl Peer {
@@ -210,7 +209,7 @@ impl PeerTable {
         Self { peers, free_ids }
     }
 
-    pub fn find(&self, addr: &net::SocketAddr) -> Option<&PeerRc> {
+    pub fn find(&self, addr: &net::SocketAddr) -> Option<&PeerRef> {
         self.peers.get(addr).map(|entry| &entry.1)
     }
 
@@ -227,7 +226,7 @@ impl PeerTable {
         addr: &net::SocketAddr,
         endpoint_config: endpoint::Config,
         server_weak: &ServerCoreWeak,
-    ) -> PeerRc {
+    ) -> PeerRef {
         // A peer may not already exist at this address
         debug_assert!(!self.peers.contains_key(addr));
 
@@ -241,13 +240,13 @@ impl PeerTable {
             endpoint_config,
             Weak::clone(server_weak),
         );
-        let peer_rc = Rc::new(RefCell::new(peer));
+        let peer_ref = Arc::new(RwLock::new(peer));
 
         // Associate with given address
         self.peers
-            .insert(addr.clone(), (new_id, Rc::clone(&peer_rc)));
+            .insert(addr.clone(), (new_id, Arc::clone(&peer_ref)));
 
-        return peer_rc;
+        return peer_ref;
     }
 
     pub fn remove(&mut self, addr: &net::SocketAddr) {
@@ -261,11 +260,11 @@ impl PeerTable {
 }
 
 impl<'a> EndpointContext<'a> {
-    fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore, peer_rc: &'a PeerRc) -> Self {
+    fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore, peer_ref: &'a PeerRef) -> Self {
         Self {
             server,
             peer,
-            peer_rc,
+            peer_ref,
         }
     }
 }
@@ -286,7 +285,7 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         *timer_id = Some(
             self.server
                 .timer_wheel
-                .set_timer(time_ms, Rc::clone(self.peer_rc)),
+                .set_timer(time_ms, Arc::clone(self.peer_ref)),
         )
     }
 
@@ -303,25 +302,25 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     }
 
     fn on_connect(&mut self) {
-        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
+        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
         let event = Event::Connect(handle);
         self.server.events.push_back(event);
     }
 
     fn on_disconnect(&mut self) {
-        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
+        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
         let event = Event::Disconnect(handle);
         self.server.events.push_back(event);
     }
 
     fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
-        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
+        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
         let event = Event::Receive(handle, packet_bytes);
         self.server.events.push_back(event);
     }
 
     fn on_timeout(&mut self) {
-        let handle = PeerHandle::new(Rc::clone(&self.peer_rc));
+        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
         let event = Event::Error(handle, ErrorKind::Timeout);
         self.server.events.push_back(event);
     }
@@ -366,7 +365,7 @@ impl ServerCore {
         (time::Instant::now() - self.time_ref).as_millis() as u64
     }
 
-    fn step_timer_wheel(&mut self, timer_data_buffer: &mut Vec<PeerRc>) -> u64 {
+    fn step_timer_wheel(&mut self, timer_data_buffer: &mut Vec<PeerRef>) -> u64 {
         let now_ms = self.time_now_ms();
 
         self.timer_wheel.step(now_ms, timer_data_buffer);
@@ -399,13 +398,13 @@ impl ServerCore {
     }
 
     /// Processes all pending timer events.
-    pub fn handle_timeouts(&mut self, timer_data_buffer: &mut Vec<PeerRc>) {
+    pub fn handle_timeouts(&mut self, timer_data_buffer: &mut Vec<PeerRef>) {
         let now_ms = self.step_timer_wheel(timer_data_buffer);
 
-        for peer_rc in timer_data_buffer.drain(..) {
-            let ref mut peer = *peer_rc.borrow_mut();
+        for peer_ref in timer_data_buffer.drain(..) {
+            let ref mut peer = *peer_ref.write().unwrap();
 
-            let ref mut ctx = EndpointContext::new(self, &mut peer.core, &peer_rc);
+            let ref mut ctx = EndpointContext::new(self, &mut peer.core, &peer_ref);
 
             peer.endpoint.handle_timer(now_ms, ctx);
         }
@@ -512,18 +511,18 @@ impl ServerCore {
                         prio_config: self.config.channel_balance.clone().into(),
                     };
 
-                    let peer_rc =
+                    let peer_ref =
                         self.peer_table
                             .insert(sender_addr, endpoint_config, &self.self_weak);
 
                     let now_ms = self.time_now_ms();
 
-                    let ref mut peer = *peer_rc.borrow_mut();
+                    let ref mut peer = *peer_ref.write().unwrap();
 
                     let ref mut endpoint = peer.endpoint;
                     let ref mut peer_core = peer.core;
 
-                    let ref mut ctx = EndpointContext::new(self, peer_core, &peer_rc);
+                    let ref mut ctx = EndpointContext::new(self, peer_core, &peer_ref);
 
                     endpoint.init(now_ms, ctx);
 
@@ -560,21 +559,21 @@ impl ServerCore {
         now_ms: u64,
     ) {
         // If a peer is associated with this address, deliver this frame to its endpoint
-        if let Some(peer_rc) = self.peer_table.find(sender_addr) {
+        if let Some(peer_ref) = self.peer_table.find(sender_addr) {
             if !frame::serial::verify_crc(frame_bytes) {
                 return;
             }
 
             let payload_bytes = frame::serial::payload(frame_bytes);
 
-            let peer_rc = Rc::clone(&peer_rc);
+            let peer_ref = Arc::clone(&peer_ref);
 
-            let ref mut peer = *peer_rc.borrow_mut();
+            let ref mut peer = *peer_ref.write().unwrap();
 
             let ref mut endpoint = peer.endpoint;
             let ref mut peer_core = peer.core;
 
-            let ref mut ctx = EndpointContext::new(self, peer_core, &peer_rc);
+            let ref mut ctx = EndpointContext::new(self, peer_core, &peer_ref);
 
             endpoint.handle_frame(frame_type, payload_bytes, now_ms, ctx);
         }
@@ -669,8 +668,8 @@ impl Server {
         // to give ServerCore a weak pointer to itself that can be cloned upon Peer construction.
         // The alternative is to pass pointers to the ServerCore down the frame handling call
         // stack, which is cumbersome.
-        let core = Rc::new_cyclic(|self_weak| {
-            RefCell::new(ServerCore {
+        let core = Arc::new_cyclic(|self_weak| {
+            RwLock::new(ServerCore {
                 config,
                 time_ref,
                 socket_tx,
@@ -694,7 +693,7 @@ impl Server {
     ///
     /// Returns `None` if no events are available.
     pub fn poll_event(&mut self) -> Option<Event> {
-        let ref mut core = *self.core.borrow_mut();
+        let ref mut core = *self.core.write().unwrap();
 
         if core.events.is_empty() {
             core.handle_frames(&mut self.socket_rx);
@@ -708,7 +707,7 @@ impl Server {
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned.
     pub fn wait_event(&mut self) -> Event {
-        let ref mut core = *self.core.borrow_mut();
+        let ref mut core = *self.core.write().unwrap();
 
         loop {
             let wait_timeout = core.next_timer_timeout();
@@ -729,7 +728,7 @@ impl Server {
     ///
     /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
-        let ref mut core = *self.core.borrow_mut();
+        let ref mut core = *self.core.write().unwrap();
 
         if core.events.is_empty() {
             let mut remaining_timeout = timeout;
@@ -776,28 +775,34 @@ impl Server {
     ///
     /// *Note*: Peers may exist in the peer table for some time after they have disconnected.
     pub fn peer_count(&self) -> usize {
-        let ref core = *self.core.borrow();
+        let ref core = self.core.read().unwrap();
 
         core.peer_table.count().into()
     }
 }
 
 impl PeerHandle {
-    fn new(peer: PeerRc) -> Self {
+    fn new(peer: PeerRef) -> Self {
         Self { peer }
     }
 
     /// Returns the unique numeric ID assigned to this peer.
     pub fn id(&self) -> PeerId {
-        self.peer.borrow().core.id
+        self.peer.read().unwrap().core.id
     }
 
     /// Equivalent to calling [`PeerHandle::enqueue`] followed by [`PeerHandle::flush`].
+    ///
+    /// *Note*: When sending many packets, it is more efficient to call `enqueue` multiple times
+    /// followed by a final call to `flush`. This is especially true in a concurrent context, as
+    /// `flush` requires an exclusive lock on the server.
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        let ref mut peer = *self.peer.borrow_mut();
+        let server_weak = Weak::clone(&self.peer.read().unwrap().server_weak);
 
-        if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
-            let ref mut server = *server_rc.borrow_mut();
+        if let Some(server_ref) = Weak::upgrade(&server_weak) {
+            // Lock server core before locking peer
+            let ref mut server = *server_ref.write().unwrap();
+            let ref mut peer = *self.peer.write().unwrap();
 
             let now_ms = server.time_now_ms();
 
@@ -810,23 +815,24 @@ impl PeerHandle {
 
     /// Enqueues a packet to be sent to this peer.
     pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        let ref mut peer = *self.peer.borrow_mut();
+        let server_weak = Weak::clone(&self.peer.read().unwrap().server_weak);
 
-        if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
-            let ref mut server = *server_rc.borrow_mut();
+        if let Some(server_ref) = Weak::upgrade(&server_weak) {
+            let now_ms = server_ref.read().unwrap().time_now_ms();
 
-            let now_ms = server.time_now_ms();
-
+            let ref mut peer = *self.peer.write().unwrap();
             peer.endpoint.enqueue(packet_bytes, mode, now_ms);
         }
     }
 
     /// Sends as much data as possible for this peer on the underlying socket.
     pub fn flush(&mut self) {
-        let ref mut peer = *self.peer.borrow_mut();
+        let server_weak = Weak::clone(&self.peer.read().unwrap().server_weak);
 
-        if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
-            let ref mut server = *server_rc.borrow_mut();
+        if let Some(server_ref) = Weak::upgrade(&server_weak) {
+            // Lock server core before locking peer
+            let ref mut server = *server_ref.write().unwrap();
+            let ref mut peer = *self.peer.write().unwrap();
 
             let now_ms = server.time_now_ms();
 
@@ -839,10 +845,12 @@ impl PeerHandle {
     /// Disconnects this peer gracefully. No more packets will be sent or received once this
     /// function has been called.
     pub fn disconnect(&mut self) {
-        let ref mut peer = *self.peer.borrow_mut();
+        let server_weak = Weak::clone(&self.peer.read().unwrap().server_weak);
 
-        if let Some(server_rc) = Weak::upgrade(&peer.server_weak) {
-            let ref mut server = *server_rc.borrow_mut();
+        if let Some(server_ref) = Weak::upgrade(&server_weak) {
+            // Lock server core before locking peer
+            let ref mut server = *server_ref.write().unwrap();
+            let ref mut peer = *self.peer.write().unwrap();
 
             let now_ms = server.time_now_ms();
 

@@ -1,7 +1,6 @@
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::net;
-use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 use std::time;
 
 use super::endpoint;
@@ -66,7 +65,7 @@ impl Config {
     }
 }
 
-type EndpointRc = Rc<RefCell<endpoint::Endpoint>>;
+type EndpointRef = Arc<RwLock<endpoint::Endpoint>>;
 
 enum HandshakePhase {
     Alpha,
@@ -83,7 +82,7 @@ struct HandshakeState {
 }
 
 struct ActiveState {
-    endpoint_rc: EndpointRc,
+    endpoint_ref: EndpointRef,
 }
 
 enum State {
@@ -225,8 +224,8 @@ impl ClientCore {
                 }
             }
             State::Active(state) => {
-                let endpoint_rc = Rc::clone(&state.endpoint_rc);
-                let mut endpoint = endpoint_rc.borrow_mut();
+                let endpoint_ref = Arc::clone(&state.endpoint_ref);
+                let mut endpoint = endpoint_ref.write().unwrap();
 
                 let ref mut host_ctx = EndpointContext::new(self);
 
@@ -315,15 +314,15 @@ impl ClientCore {
                                     };
 
                                     let endpoint = endpoint::Endpoint::new(endpoint_config);
-                                    let endpoint_rc = Rc::new(RefCell::new(endpoint));
+                                    let endpoint_ref = Arc::new(RwLock::new(endpoint));
 
                                     // Switch to active state
                                     self.state = State::Active(ActiveState {
-                                        endpoint_rc: Rc::clone(&endpoint_rc),
+                                        endpoint_ref: Arc::clone(&endpoint_ref),
                                     });
 
                                     // Initialize endpoint
-                                    let mut endpoint = endpoint_rc.borrow_mut();
+                                    let mut endpoint = endpoint_ref.write().unwrap();
 
                                     let ref mut host_ctx = EndpointContext::new(self);
 
@@ -364,8 +363,8 @@ impl ClientCore {
     ) {
         match self.state {
             State::Active(ref mut state) => {
-                let endpoint_rc = Rc::clone(&state.endpoint_rc);
-                let mut endpoint = endpoint_rc.borrow_mut();
+                let endpoint_ref = Arc::clone(&state.endpoint_ref);
+                let mut endpoint = endpoint_ref.write().unwrap();
 
                 let ref mut host_ctx = EndpointContext::new(self);
 
@@ -435,8 +434,8 @@ impl ClientCore {
                 state.packet_buffer.push((packet_bytes, mode));
             }
             State::Active(state) => {
-                let endpoint_rc = Rc::clone(&state.endpoint_rc);
-                let mut endpoint = endpoint_rc.borrow_mut();
+                let endpoint_ref = Arc::clone(&state.endpoint_ref);
+                let mut endpoint = endpoint_ref.write().unwrap();
 
                 let now_ms = self.time_now_ms();
 
@@ -455,8 +454,8 @@ impl ClientCore {
                 state.packet_buffer.push((packet_bytes, mode));
             }
             State::Active(state) => {
-                let endpoint_rc = Rc::clone(&state.endpoint_rc);
-                let mut endpoint = endpoint_rc.borrow_mut();
+                let endpoint_ref = Arc::clone(&state.endpoint_ref);
+                let mut endpoint = endpoint_ref.write().unwrap();
 
                 let now_ms = self.time_now_ms();
 
@@ -470,8 +469,8 @@ impl ClientCore {
         match &mut self.state {
             State::Handshake(_) => {}
             State::Active(state) => {
-                let endpoint_rc = Rc::clone(&state.endpoint_rc);
-                let mut endpoint = endpoint_rc.borrow_mut();
+                let endpoint_ref = Arc::clone(&state.endpoint_ref);
+                let mut endpoint = endpoint_ref.write().unwrap();
 
                 let now_ms = self.time_now_ms();
 
@@ -487,8 +486,8 @@ impl ClientCore {
         match &mut self.state {
             State::Handshake(_) => {}
             State::Active(state) => {
-                let endpoint_rc = Rc::clone(&state.endpoint_rc);
-                let mut endpoint = endpoint_rc.borrow_mut();
+                let endpoint_ref = Arc::clone(&state.endpoint_ref);
+                let mut endpoint = endpoint_ref.write().unwrap();
 
                 let now_ms = self.time_now_ms();
 

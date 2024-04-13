@@ -2,7 +2,7 @@ use super::FragmentRc;
 use super::FragmentRef;
 
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::sync::Arc;
 
 // No sendable fragments sent:
 // v---------------
@@ -53,7 +53,7 @@ impl TxBuffer {
         let mut index = 0;
         let mut first = true;
 
-        let packet_rc = Rc::new(packet);
+        let packet_rc = Arc::new(packet);
 
         while bytes_remaining > self.fragment_size {
             let data_range = index..index + self.fragment_size;
@@ -62,7 +62,7 @@ impl TxBuffer {
                 fragment: FragmentRc {
                     first,
                     last: false,
-                    data: Rc::clone(&packet_rc),
+                    data: Arc::clone(&packet_rc),
                     data_range,
                 },
                 expire_time_ms,
@@ -213,7 +213,6 @@ impl RxBuffer {
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
-    use std::rc::Rc;
 
     use super::*;
 
@@ -246,7 +245,7 @@ mod tests {
         // Enqueue a single packet
         send_buf.push(packet_data.clone(), u64::max_value());
 
-        let packet_data_rc = Rc::new(packet_data.clone());
+        let packet_data_rc = Arc::new(packet_data.clone());
 
         // Test the ranges and IDs of resulting fragments
         for (idx, range) in ranges.iter().enumerate() {

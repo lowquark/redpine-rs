@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::rc::Rc;
+use std::sync::Arc;
 
 mod reliable;
 mod unreliable;
@@ -25,7 +25,7 @@ impl Window {
 pub struct FragmentRc {
     pub first: bool,
     pub last: bool,
-    pub data: Rc<Box<[u8]>>,
+    pub data: Arc<Box<[u8]>>,
     pub data_range: Range<usize>,
 }
 
