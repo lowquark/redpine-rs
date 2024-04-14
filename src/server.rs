@@ -173,6 +173,7 @@ pub struct Server {
 }
 
 /// Represents a connected client.
+#[derive(Clone)]
 pub struct PeerHandle {
     peer: PeerRef,
 }
@@ -860,6 +861,14 @@ impl PeerHandle {
         }
     }
 }
+
+impl std::cmp::PartialEq for PeerHandle {
+    fn eq(&self, other: &PeerHandle) -> bool {
+        Arc::ptr_eq(&self.peer, &other.peer)
+    }
+}
+
+impl std::cmp::Eq for PeerHandle {}
 
 impl std::fmt::Debug for PeerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
