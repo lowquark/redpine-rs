@@ -5,21 +5,22 @@ pub trait Timer {
     fn test(&self, now_ms: u64) -> bool;
 }
 
-#[derive(Default)]
 pub struct TimerQueue<T> {
     queue: VecDeque<Weak<T>>,
+}
+
+impl<T> Default for TimerQueue<T> {
+    fn default() -> Self {
+        Self {
+            queue: Default::default(),
+        }
+    }
 }
 
 impl<T> TimerQueue<T>
 where
     T: Timer,
 {
-    pub fn new() -> Self {
-        Self {
-            queue: Default::default(),
-        }
-    }
-
     pub fn add_timer(&mut self, timer: Weak<T>) {
         self.queue.push_back(timer);
     }
@@ -81,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_trigger_callback_called() {
-        let mut queue = TimerQueue::new();
+        let mut queue = TimerQueue::default();
         let count = Arc::new(Mutex::new(0));
 
         let timer = Arc::new(MockTimer {
@@ -102,7 +103,7 @@ mod tests {
 
     #[test]
     fn test_no_trigger_if_test_returns_false() {
-        let mut queue = TimerQueue::new();
+        let mut queue = TimerQueue::default();
         let count = Arc::new(Mutex::new(0));
 
         let timer = Arc::new(MockTimer {
@@ -123,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_expired_timer_removed() {
-        let mut queue = TimerQueue::new();
+        let mut queue = TimerQueue::default();
 
         let timer = Arc::new(MockTimer {
             should_trigger: true,
@@ -141,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_limit_respected() {
-        let mut queue = TimerQueue::new();
+        let mut queue = TimerQueue::default();
         let count = Arc::new(Mutex::new(0));
 
         let mut timers = Vec::new();

@@ -79,9 +79,6 @@ impl Config {
     }
 }
 
-/// Numeric identifier for peers.
-pub type PeerId = u32;
-
 struct Epoch {
     time_base: time::Instant,
 }
@@ -99,12 +96,10 @@ impl Epoch {
 }
 
 struct PeerCore {
-    // Peer identifier, 0 is a valid identifier
-    id: PeerId,
     // Remote address
     addr: net::SocketAddr,
     // Independent user data associated with this peer
-    data: Option<Arc<dyn any::Any>>,
+    data: Option<Arc<dyn any::Any + Send + Sync>>,
     // Server epoch
     epoch: Arc<Epoch>,
     // Permits sending frames from a peer handle
@@ -138,13 +133,6 @@ impl timer_queue::Timer for RwLock<Peer> {
     }
 }
 
-struct PeerTable {
-    // Mapping from sender address to peer
-    peers: HashMap<net::SocketAddr, (PeerId, PeerRef)>,
-    // Stack of unused IDs
-    free_ids: Vec<PeerId>,
-}
-
 type TimerQueue = timer_queue::TimerQueue<RwLock<Peer>>;
 
 /// Represents a server event.
@@ -175,7 +163,7 @@ struct ServerCore {
     // Key used to compute handshake MACs
     siphash_key: [u8; 16],
     // Table of connected peers
-    peer_table: PeerTable,
+    peers: HashMap<net::SocketAddr, PeerRef>,
     // Pending timer events
     timer_queue: TimerQueue,
     // Queue of pending events
@@ -200,7 +188,6 @@ pub struct PeerHandle {
 
 impl Peer {
     fn new(
-        id: PeerId,
         addr: net::SocketAddr,
         endpoint_config: endpoint::Config,
         epoch: Arc<Epoch>,
@@ -209,7 +196,6 @@ impl Peer {
     ) -> Self {
         Self {
             core: PeerCore {
-                id,
                 addr,
                 data: None,
                 epoch,
@@ -219,73 +205,6 @@ impl Peer {
             },
             endpoint: endpoint::Endpoint::new(endpoint_config),
         }
-    }
-}
-
-impl PeerTable {
-    pub fn new(count_max: usize) -> Self {
-        debug_assert!(count_max > 0);
-        debug_assert!(count_max - 1 <= PeerId::max_value() as usize);
-
-        let peers = HashMap::new();
-        let free_ids = (0..count_max)
-            .map(|i| (count_max - 1 - i) as PeerId)
-            .collect::<Vec<_>>();
-
-        Self { peers, free_ids }
-    }
-
-    pub fn find(&self, addr: &net::SocketAddr) -> Option<&PeerRef> {
-        self.peers.get(addr).map(|entry| &entry.1)
-    }
-
-    pub fn is_full(&self) -> bool {
-        self.free_ids.len() == 0
-    }
-
-    pub fn contains(&self, addr: &net::SocketAddr) -> bool {
-        self.peers.contains_key(addr)
-    }
-
-    pub fn insert(
-        &mut self,
-        addr: &net::SocketAddr,
-        endpoint_config: endpoint::Config,
-        epoch: Arc<Epoch>,
-        socket_tx: Arc<socket::SocketTx>,
-        events: Arc<Mutex<VecDeque<Event>>>,
-    ) -> PeerRef {
-        // A peer may not already exist at this address
-        debug_assert!(!self.peers.contains_key(addr));
-
-        // Allocate an ID (an empty stack means we have reached the peer limit)
-        let new_id = self.free_ids.pop().unwrap();
-
-        // Create new peer object
-        let peer = Peer::new(
-            new_id,
-            addr.clone(),
-            endpoint_config,
-            epoch,
-            socket_tx,
-            events,
-        );
-        let peer_ref = Arc::new(RwLock::new(peer));
-
-        // Associate with given address
-        self.peers
-            .insert(addr.clone(), (new_id, Arc::clone(&peer_ref)));
-
-        return peer_ref;
-    }
-
-    pub fn remove(&mut self, addr: &net::SocketAddr) {
-        let (id, _) = self.peers.remove(addr).expect("double free?");
-        self.free_ids.push(id);
-    }
-
-    pub fn count(&self) -> usize {
-        self.peers.len()
     }
 }
 
@@ -399,7 +318,7 @@ impl ServerCore {
             match peer.endpoint.handle_rto_timer(now_ms, ctx) {
                 endpoint::TimeoutAction::Continue => (),
                 endpoint::TimeoutAction::Terminate => {
-                    self.peer_table.remove(&peer.core.addr);
+                    self.peers.remove(&peer.core.addr);
                 }
             }
         }
@@ -494,9 +413,9 @@ impl ServerCore {
                 let params_compatible =
                     connection_params_compatible(&frame.client_params, &server_params);
 
-                let error = if self.peer_table.contains(sender_addr) {
+                let error = if self.peers.contains_key(sender_addr) {
                     None
-                } else if self.peer_table.is_full() {
+                } else if self.peers.len() >= self.config.peer_count_max {
                     Some(frame::HandshakeErrorKind::Capacity)
                 } else if !params_compatible {
                     Some(frame::HandshakeErrorKind::Parameter)
@@ -506,15 +425,25 @@ impl ServerCore {
                         prio_config: self.config.channel_balance.clone().into(),
                     };
 
-                    let peer_ref = self.peer_table.insert(
-                        sender_addr,
+                    // Create new peer object
+                    let peer = Peer::new(
+                        sender_addr.clone(),
                         endpoint_config,
                         Arc::clone(&self.epoch),
                         Arc::clone(&self.socket_tx),
                         Arc::clone(&self.events),
                     );
 
+                    let peer_ref = Arc::new(RwLock::new(peer));
+
+                    // Associate with given address
+                    self.peers
+                        .insert(sender_addr.clone(), Arc::clone(&peer_ref));
+
+                    // Add to the timer queue
                     self.timer_queue.add_timer(Arc::downgrade(&peer_ref));
+
+                    // Initialize endpoint
 
                     let now_ms = self.epoch.time_now_ms();
 
@@ -526,13 +455,6 @@ impl ServerCore {
                     let ref mut ctx = EndpointContext::new(peer_core, &peer_ref);
 
                     endpoint.init(now_ms, ctx);
-
-                    /*
-                    println!(
-                        "created peer {}, for sender address {:?}",
-                        peer_core.id, sender_addr
-                    );
-                    */
 
                     None
                 };
@@ -560,7 +482,7 @@ impl ServerCore {
         now_ms: u64,
     ) {
         // If a peer is associated with this address, deliver this frame to its endpoint
-        if let Some(peer_ref) = self.peer_table.find(sender_addr) {
+        if let Some(peer_ref) = self.peers.get(sender_addr) {
             if !frame::serial::verify_crc(frame_bytes) {
                 return;
             }
@@ -661,9 +583,6 @@ impl Server {
             .try_into()
             .unwrap();
 
-        let peer_table = PeerTable::new(config.peer_count_max);
-        let timer_queue = TimerQueue::new();
-
         // In order to do interesting things with Peer objects, PeerHandles require Peers to keep a
         // (weak) pointer to the ServerCore object. The most convenient way to accomplish this is
         // to give ServerCore a weak pointer to itself that can be cloned upon Peer construction.
@@ -674,8 +593,8 @@ impl Server {
             epoch: Arc::new(epoch),
             socket_tx: Arc::new(socket_tx),
             siphash_key,
-            peer_table,
-            timer_queue,
+            peers: Default::default(),
+            timer_queue: Default::default(),
             events: Default::default(),
         };
 
@@ -773,7 +692,7 @@ impl Server {
     ///
     /// *Note*: Peers may exist in the peer table for some time after they have disconnected.
     pub fn peer_count(&self) -> usize {
-        self.core.peer_table.count().into()
+        self.core.peers.len()
     }
 }
 
@@ -782,18 +701,13 @@ impl PeerHandle {
         Self { peer }
     }
 
-    /// Returns the unique numeric ID assigned to this peer.
-    pub fn id(&self) -> PeerId {
-        self.peer.read().unwrap().core.id
-    }
-
     /// Returns the user data associated with this peer.
-    pub fn data(&self) -> Option<Arc<dyn any::Any>> {
+    pub fn data(&self) -> Option<Arc<dyn any::Any + Send + Sync>> {
         self.peer.read().unwrap().core.data.clone()
     }
 
     /// Associates user data with this peer.
-    pub fn set_data(&self, data: Option<Arc<dyn any::Any>>) {
+    pub fn set_data(&self, data: Option<Arc<dyn any::Any + Send + Sync>>) {
         self.peer.write().unwrap().core.data = data;
     }
 
@@ -855,8 +769,6 @@ impl std::cmp::Eq for PeerHandle {}
 
 impl std::fmt::Debug for PeerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PeerHandle")
-            .field("id", &self.id())
-            .finish()
+        f.debug_struct("PeerHandle").finish()
     }
 }

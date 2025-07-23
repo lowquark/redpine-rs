@@ -1,4 +1,5 @@
 use std::sync::mpsc::{self, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
 
@@ -26,33 +27,32 @@ fn run_server(port: u16, config: redpine::ServerConfig, rx: mpsc::Receiver<()>) 
         unrel_stream: StreamData,
     }
 
-    let mut peer_data = std::collections::HashMap::new();
-
     loop {
         let event_timeout = time::Duration::from_millis(1000);
 
         while let Some(event) = server.wait_event_timeout(event_timeout) {
             match event {
                 redpine::ServerEvent::Connect(peer) => {
-                    peer_data.insert(
-                        peer.id(),
-                        PeerData {
-                            rel_stream: StreamData {
-                                md5_ctx: Some(md5::Context::new()),
-                                next_id: 0,
-                                log: Vec::new(),
-                            },
-                            unrel_stream: StreamData {
-                                md5_ctx: Some(md5::Context::new()),
-                                next_id: 0,
-                                log: Vec::new(),
-                            },
+                    let peer_data = Arc::new(Mutex::new(PeerData {
+                        rel_stream: StreamData {
+                            md5_ctx: Some(md5::Context::new()),
+                            next_id: 0,
+                            log: Vec::new(),
                         },
-                    );
+                        unrel_stream: StreamData {
+                            md5_ctx: Some(md5::Context::new()),
+                            next_id: 0,
+                            log: Vec::new(),
+                        },
+                    }));
+
+                    peer.set_data(Some(peer_data as Arc<dyn std::any::Any + Send + Sync>));
                 }
                 redpine::ServerEvent::Disconnect(_) => {}
                 redpine::ServerEvent::Receive(mut peer, bytes) => {
-                    let ref mut peer_data = peer_data.get_mut(&peer.id()).unwrap();
+                    let peer_data = peer.data().unwrap().downcast::<Mutex<PeerData>>().unwrap();
+
+                    let mut peer_data = peer_data.lock().unwrap();
 
                     let packet = Packet::from_bytes(&bytes);
 
