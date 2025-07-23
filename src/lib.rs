@@ -166,7 +166,7 @@ mod buffer;
 mod endpoint;
 mod frame;
 mod socket;
-mod timer_wheel;
+mod timer_queue;
 
 /// Client-related functionality.
 pub mod client;

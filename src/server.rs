@@ -10,24 +10,12 @@ use siphasher::sip;
 use super::endpoint;
 use super::frame;
 use super::socket;
-use super::timer_wheel;
+use super::timer_queue;
 use super::ErrorKind;
 use super::SendMode;
 
-const TIMER_WHEEL_CONFIG: [timer_wheel::ArrayConfig; 3] = [
-    timer_wheel::ArrayConfig {
-        size: 32,
-        ms_per_bin: 4,
-    },
-    timer_wheel::ArrayConfig {
-        size: 32,
-        ms_per_bin: 4 * 8,
-    },
-    timer_wheel::ArrayConfig {
-        size: 32,
-        ms_per_bin: 4 * 8 * 8,
-    },
-];
+const TIMER_TEST_LIMIT: usize = 24;
+const TIMER_TEST_INTERVAL: time::Duration = time::Duration::from_millis(250);
 
 const FRAME_SIZE_MAX: usize = 1472;
 
@@ -90,7 +78,8 @@ impl Config {
     }
 }
 
-type PeerId = u32;
+/// Numeric identifier for peers.
+pub type PeerId = u32;
 
 struct PeerCore {
     // Peer identifier, 0 is a valid identifier
@@ -98,7 +87,7 @@ struct PeerCore {
     // Remote address
     addr: net::SocketAddr,
     // Current timer states
-    rto_timer: Option<timer_wheel::TimerId>,
+    rto_timer: Option<u64>,
 }
 
 struct Peer {
@@ -112,6 +101,20 @@ struct Peer {
 
 type PeerRef = Arc<RwLock<Peer>>;
 
+impl timer_queue::Timer for RwLock<Peer> {
+    fn test(&self, time_now: u64) -> bool {
+        if let Ok(peer) = &mut self.write() {
+            if let Some(t) = &peer.core.rto_timer {
+                if *t < time_now {
+                    peer.core.rto_timer = None;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
 struct PeerTable {
     // Mapping from sender address to peer
     peers: HashMap<net::SocketAddr, (PeerId, PeerRef)>,
@@ -119,7 +122,7 @@ struct PeerTable {
     free_ids: Vec<PeerId>,
 }
 
-type TimerWheel = timer_wheel::TimerWheel<PeerRef>;
+type TimerQueue = timer_queue::TimerQueue<RwLock<Peer>>;
 
 /// Represents a server event.
 #[derive(Debug)]
@@ -152,7 +155,7 @@ struct ServerCore {
     // Table of connected peers
     peer_table: PeerTable,
     // Pending timer events
-    timer_wheel: TimerWheel,
+    timer_queue: TimerQueue,
     // Queue of pending events
     events: VecDeque<Event>,
     // Weak pointer to self, for peer creation
@@ -277,25 +280,11 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     }
 
     fn set_rto_timer(&mut self, time_ms: u64) {
-        let ref mut timer_id = self.peer.rto_timer;
-
-        if let Some(id) = timer_id.take() {
-            self.server.timer_wheel.unset_timer(id);
-        }
-
-        *timer_id = Some(
-            self.server
-                .timer_wheel
-                .set_timer(time_ms, Arc::clone(self.peer_ref)),
-        )
+        self.peer.rto_timer = Some(time_ms);
     }
 
     fn unset_rto_timer(&mut self) {
-        let ref mut timer_id = self.peer.rto_timer;
-
-        if let Some(id) = timer_id.take() {
-            self.server.timer_wheel.unset_timer(id);
-        }
+        self.peer.rto_timer = None;
     }
 
     fn destroy_self(&mut self) {
@@ -369,33 +358,20 @@ impl ServerCore {
     fn step_timer_wheel(&mut self, timer_data_buffer: &mut Vec<PeerRef>) -> u64 {
         let now_ms = self.time_now_ms();
 
-        self.timer_wheel.step(now_ms, timer_data_buffer);
+        self.timer_queue.test(TIMER_TEST_LIMIT, now_ms, |peer| {
+            timer_data_buffer.push(Arc::clone(peer))
+        });
 
         return now_ms;
     }
 
     /// Returns a duration representing the time until the next timer event, if one exists.
     pub fn next_timer_timeout(&self) -> Option<time::Duration> {
-        // WLOG, assume the time reference is zero. All units are ms, and `_ms` denotes an integer
-        // timestamp as is convention in the code.
-        //
-        //   1: t_now_ms = floor(t_now) ≤ t_now
-        //   1: t_now - t_now_ms ≥ 0
-        //   2: t_wake ≥ t_now + (t_expire_ms - t_now_ms)
-        //   2: t_wake ≥ (t_now - t_now_ms) + t_expire_ms
-        // 2∘1: t_wake ≥ t_expire_ms
-        // 2∘1: floor(t_wake) ≥ floor(t_expire_ms) = t_expire_ms
-        // 2∘1: t_wake_ms ≥ t_expire_ms
-        //
-        // Since t_wake will round to a minimum of t_expire_ms, we will not skip a timer by waking
-        // too soon.
-
-        let now_ms = self.time_now_ms();
-
-        return self
-            .timer_wheel
-            .next_expiration_time_ms()
-            .map(|expire_time_ms| time::Duration::from_millis(expire_time_ms - now_ms));
+        if self.timer_queue.len() > 0 {
+            Some(TIMER_TEST_INTERVAL)
+        } else {
+            None
+        }
     }
 
     /// Processes all pending timer events.
@@ -515,6 +491,8 @@ impl ServerCore {
                     let peer_ref =
                         self.peer_table
                             .insert(sender_addr, endpoint_config, &self.self_weak);
+
+                    self.timer_queue.add_timer(Arc::downgrade(&peer_ref));
 
                     let now_ms = self.time_now_ms();
 
@@ -662,7 +640,7 @@ impl Server {
             .unwrap();
 
         let peer_table = PeerTable::new(config.peer_count_max);
-        let timer_wheel = TimerWheel::new(&TIMER_WHEEL_CONFIG, 0);
+        let timer_queue = TimerQueue::new();
 
         // In order to do interesting things with Peer objects, PeerHandles require Peers to keep a
         // (weak) pointer to the ServerCore object. The most convenient way to accomplish this is
@@ -676,7 +654,7 @@ impl Server {
                 socket_tx,
                 siphash_key,
                 peer_table,
-                timer_wheel,
+                timer_queue,
                 events: VecDeque::new(),
                 self_weak: Weak::clone(self_weak),
             })
