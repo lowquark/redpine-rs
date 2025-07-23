@@ -521,7 +521,7 @@ impl Client {
 
         let bind_address = (std::net::Ipv4Addr::UNSPECIFIED, 0);
 
-        let (mut socket_tx, socket_rx) =
+        let (socket_tx, socket_rx) =
             socket::new_connected(bind_address, server_addr, FRAME_SIZE_MAX)?;
 
         let local_nonce = rand::random::<u32>();

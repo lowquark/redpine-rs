@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt;
 use std::net;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time;
 
 use siphasher::sip;
@@ -86,8 +86,12 @@ struct PeerCore {
     id: PeerId,
     // Remote address
     addr: net::SocketAddr,
-    // Current timer states
+    // Current timer state
     rto_timer: Option<u64>,
+    // Permits sending frames from a peer handle
+    socket_tx: Arc<socket::SocketTx>,
+    // Permits signaling events from a peer handle
+    events: Arc<Mutex<VecDeque<Event>>>,
 }
 
 struct Peer {
@@ -138,7 +142,6 @@ pub enum Event {
 }
 
 struct EndpointContext<'a> {
-    server: &'a mut ServerCore,
     peer: &'a mut PeerCore,
     peer_ref: &'a PeerRef,
 }
@@ -149,7 +152,7 @@ struct ServerCore {
     // Timestamps are computed relative to this instant
     time_ref: time::Instant,
     // Socket send handle
-    socket_tx: socket::SocketTx,
+    socket_tx: Arc<socket::SocketTx>,
     // Key used to compute handshake MACs
     siphash_key: [u8; 16],
     // Table of connected peers
@@ -157,7 +160,7 @@ struct ServerCore {
     // Pending timer events
     timer_queue: TimerQueue,
     // Queue of pending events
-    events: VecDeque<Event>,
+    events: Arc<Mutex<VecDeque<Event>>>,
     // Weak pointer to self, for peer creation
     self_weak: ServerCoreWeak,
 }
@@ -187,12 +190,16 @@ impl Peer {
         addr: net::SocketAddr,
         endpoint_config: endpoint::Config,
         server_weak: ServerCoreWeak,
+        socket_tx: Arc<socket::SocketTx>,
+        events: Arc<Mutex<VecDeque<Event>>>,
     ) -> Self {
         Self {
             core: PeerCore {
                 id,
                 addr,
                 rto_timer: None,
+                socket_tx,
+                events,
             },
             endpoint: endpoint::Endpoint::new(endpoint_config),
             server_weak,
@@ -230,6 +237,8 @@ impl PeerTable {
         addr: &net::SocketAddr,
         endpoint_config: endpoint::Config,
         server_weak: &ServerCoreWeak,
+        socket_tx: Arc<socket::SocketTx>,
+        events: Arc<Mutex<VecDeque<Event>>>,
     ) -> PeerRef {
         // A peer may not already exist at this address
         debug_assert!(!self.peers.contains_key(addr));
@@ -243,6 +252,8 @@ impl PeerTable {
             addr.clone(),
             endpoint_config,
             Weak::clone(server_weak),
+            socket_tx,
+            events,
         );
         let peer_ref = Arc::new(RwLock::new(peer));
 
@@ -264,19 +275,15 @@ impl PeerTable {
 }
 
 impl<'a> EndpointContext<'a> {
-    fn new(server: &'a mut ServerCore, peer: &'a mut PeerCore, peer_ref: &'a PeerRef) -> Self {
-        Self {
-            server,
-            peer,
-            peer_ref,
-        }
+    fn new(peer: &'a mut PeerCore, peer_ref: &'a PeerRef) -> Self {
+        Self { peer, peer_ref }
     }
 }
 
 impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn send_frame(&mut self, frame_bytes: &[u8]) {
         // println!("{:?} <- {:02X?}", self.peer.addr, frame_bytes);
-        self.server.socket_tx.send(frame_bytes, &self.peer.addr);
+        self.peer.socket_tx.send(frame_bytes, &self.peer.addr);
     }
 
     fn set_rto_timer(&mut self, time_ms: u64) {
@@ -290,25 +297,25 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     fn on_connect(&mut self) {
         let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
         let event = Event::Connect(handle);
-        self.server.events.push_back(event);
+        self.peer.events.lock().unwrap().push_back(event);
     }
 
     fn on_disconnect(&mut self) {
         let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
         let event = Event::Disconnect(handle);
-        self.server.events.push_back(event);
+        self.peer.events.lock().unwrap().push_back(event);
     }
 
     fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
         let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
         let event = Event::Receive(handle, packet_bytes);
-        self.server.events.push_back(event);
+        self.peer.events.lock().unwrap().push_back(event);
     }
 
     fn on_timeout(&mut self) {
         let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
         let event = Event::Error(handle, ErrorKind::Timeout);
-        self.server.events.push_back(event);
+        self.peer.events.lock().unwrap().push_back(event);
     }
 }
 
@@ -377,7 +384,7 @@ impl ServerCore {
         for peer_ref in timer_data_buffer.drain(..) {
             let ref mut peer = *peer_ref.write().unwrap();
 
-            let ref mut ctx = EndpointContext::new(self, &mut peer.core, &peer_ref);
+            let ref mut ctx = EndpointContext::new(&mut peer.core, &peer_ref);
 
             match peer.endpoint.handle_rto_timer(now_ms, ctx) {
                 endpoint::TimeoutAction::Continue => (),
@@ -489,9 +496,13 @@ impl ServerCore {
                         prio_config: self.config.channel_balance.clone().into(),
                     };
 
-                    let peer_ref =
-                        self.peer_table
-                            .insert(sender_addr, endpoint_config, &self.self_weak);
+                    let peer_ref = self.peer_table.insert(
+                        sender_addr,
+                        endpoint_config,
+                        &self.self_weak,
+                        Arc::clone(&self.socket_tx),
+                        Arc::clone(&self.events),
+                    );
 
                     self.timer_queue.add_timer(Arc::downgrade(&peer_ref));
 
@@ -502,7 +513,7 @@ impl ServerCore {
                     let ref mut endpoint = peer.endpoint;
                     let ref mut peer_core = peer.core;
 
-                    let ref mut ctx = EndpointContext::new(self, peer_core, &peer_ref);
+                    let ref mut ctx = EndpointContext::new(peer_core, &peer_ref);
 
                     endpoint.init(now_ms, ctx);
 
@@ -553,7 +564,7 @@ impl ServerCore {
             let ref mut endpoint = peer.endpoint;
             let ref mut peer_core = peer.core;
 
-            let ref mut ctx = EndpointContext::new(self, peer_core, &peer_ref);
+            let ref mut ctx = EndpointContext::new(peer_core, &peer_ref);
 
             endpoint.handle_frame(frame_type, payload_bytes, now_ms, ctx);
         }
@@ -652,11 +663,11 @@ impl Server {
             RwLock::new(ServerCore {
                 config,
                 time_ref,
-                socket_tx,
+                socket_tx: Arc::new(socket_tx),
                 siphash_key,
                 peer_table,
                 timer_queue,
-                events: VecDeque::new(),
+                events: Default::default(),
                 self_weak: Weak::clone(self_weak),
             })
         });
@@ -675,13 +686,13 @@ impl Server {
     pub fn poll_event(&mut self) -> Option<Event> {
         let ref mut core = *self.core.write().unwrap();
 
-        if core.events.is_empty() {
+        if core.events.lock().unwrap().is_empty() {
             core.handle_frames(&mut self.socket_rx);
 
             core.handle_timeouts(&mut self.timer_data_buffer);
         }
 
-        return core.events.pop_front();
+        return core.events.lock().unwrap().pop_front();
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
@@ -696,7 +707,7 @@ impl Server {
 
             core.handle_timeouts(&mut self.timer_data_buffer);
 
-            if let Some(event) = core.events.pop_front() {
+            if let Some(event) = core.events.lock().unwrap().pop_front() {
                 return event;
             }
         }
@@ -710,7 +721,7 @@ impl Server {
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
         let ref mut core = *self.core.write().unwrap();
 
-        if core.events.is_empty() {
+        if core.events.lock().unwrap().is_empty() {
             let mut remaining_timeout = timeout;
             let mut wait_begin = time::Instant::now();
 
@@ -725,7 +736,7 @@ impl Server {
 
                 core.handle_timeouts(&mut self.timer_data_buffer);
 
-                if !core.events.is_empty() {
+                if !core.events.lock().unwrap().is_empty() {
                     // Found what we're looking for
                     break;
                 }
@@ -743,7 +754,7 @@ impl Server {
             }
         }
 
-        return core.events.pop_front();
+        return core.events.lock().unwrap().pop_front();
     }
 
     /// Returns the local address of the internal UDP socket.
@@ -786,7 +797,7 @@ impl PeerHandle {
 
             let now_ms = server.time_now_ms();
 
-            let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
+            let ref mut ctx = EndpointContext::new(&mut peer.core, &self.peer);
 
             peer.endpoint.enqueue(packet_bytes, mode, now_ms);
             peer.endpoint.flush(now_ms, ctx);
@@ -816,7 +827,7 @@ impl PeerHandle {
 
             let now_ms = server.time_now_ms();
 
-            let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
+            let ref mut ctx = EndpointContext::new(&mut peer.core, &self.peer);
 
             peer.endpoint.flush(now_ms, ctx);
         }
@@ -834,7 +845,7 @@ impl PeerHandle {
 
             let now_ms = server.time_now_ms();
 
-            let ref mut ctx = EndpointContext::new(server, &mut peer.core, &self.peer);
+            let ref mut ctx = EndpointContext::new(&mut peer.core, &self.peer);
 
             peer.endpoint.disconnect(now_ms, ctx);
         }

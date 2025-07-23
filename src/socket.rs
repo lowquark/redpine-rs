@@ -40,7 +40,7 @@ pub struct ConnectedSocketRx {
 }
 
 impl SocketTx {
-    pub fn send(&mut self, frame: &[u8], addr: &net::SocketAddr) {
+    pub fn send(&self, frame: &[u8], addr: &net::SocketAddr) {
         let _ = self.socket.send_to(frame, addr);
     }
 }
@@ -125,7 +125,7 @@ where
 }
 
 impl ConnectedSocketTx {
-    pub fn send(&mut self, frame: &[u8]) {
+    pub fn send(&self, frame: &[u8]) {
         let _ = self.socket.send(frame);
     }
 }
