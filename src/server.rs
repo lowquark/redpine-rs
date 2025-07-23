@@ -1,3 +1,4 @@
+use std::any;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt;
@@ -102,6 +103,8 @@ struct PeerCore {
     id: PeerId,
     // Remote address
     addr: net::SocketAddr,
+    // Independent user data associated with this peer
+    data: Option<Arc<dyn any::Any>>,
     // Server epoch
     epoch: Arc<Epoch>,
     // Permits sending frames from a peer handle
@@ -208,6 +211,7 @@ impl Peer {
             core: PeerCore {
                 id,
                 addr,
+                data: None,
                 epoch,
                 socket_tx,
                 events,
@@ -781,6 +785,16 @@ impl PeerHandle {
     /// Returns the unique numeric ID assigned to this peer.
     pub fn id(&self) -> PeerId {
         self.peer.read().unwrap().core.id
+    }
+
+    /// Returns the user data associated with this peer.
+    pub fn data(&self) -> Option<Arc<dyn any::Any>> {
+        self.peer.read().unwrap().core.data.clone()
+    }
+
+    /// Associates user data with this peer.
+    pub fn set_data(&self, data: Option<Arc<dyn any::Any>>) {
+        self.peer.write().unwrap().core.data = data;
     }
 
     /// Equivalent to calling [`PeerHandle::enqueue`] followed by [`PeerHandle::flush`].
