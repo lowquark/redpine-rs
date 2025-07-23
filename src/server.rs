@@ -14,9 +14,6 @@ use super::timer_queue;
 use super::ErrorKind;
 use super::SendMode;
 
-const TIMER_TEST_LIMIT: usize = 24;
-const TIMER_TEST_INTERVAL: time::Duration = time::Duration::from_millis(250);
-
 const FRAME_SIZE_MAX: usize = 1472;
 
 const PEER_COUNT_MAX_DEFAULT: usize = 8;
@@ -26,6 +23,9 @@ const HANDSHAKE_TIMEOUT_MS: u32 = 10_000;
 
 const CONNECTION_TIMEOUT_DEFAULT_MS: u64 = 10_000;
 const CONNECTION_TIMEOUT_MIN_MS: u64 = 2_000;
+
+const TIMER_TEST_LIMIT: usize = 24;
+const TIMER_TEST_INTERVAL: time::Duration = time::Duration::from_millis(250);
 
 /// Configuration for a [`Server`] object.
 #[derive(Clone)]
@@ -287,10 +287,6 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         self.peer.rto_timer = None;
     }
 
-    fn destroy_self(&mut self) {
-        self.server.peer_table.remove(&self.peer.addr);
-    }
-
     fn on_connect(&mut self) {
         let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
         let event = Event::Connect(handle);
@@ -383,7 +379,12 @@ impl ServerCore {
 
             let ref mut ctx = EndpointContext::new(self, &mut peer.core, &peer_ref);
 
-            peer.endpoint.handle_timer(now_ms, ctx);
+            match peer.endpoint.handle_rto_timer(now_ms, ctx) {
+                endpoint::TimeoutAction::Continue => (),
+                endpoint::TimeoutAction::Terminate => {
+                    self.peer_table.remove(&peer.core.addr);
+                }
+            }
         }
     }
 

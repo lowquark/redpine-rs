@@ -59,6 +59,11 @@ pub struct ChannelBalanceConfig {
     pub burst_size: usize,
 }
 
+pub enum TimeoutAction {
+    Continue,
+    Terminate,
+}
+
 impl ChannelBalanceConfig {
     pub(super) fn validate(&self) {
         // Hackily construct the underlying config type, which performs its own assertions
@@ -100,9 +105,6 @@ pub trait HostContext {
 
     // Called to unset the rto timer
     fn unset_rto_timer(&mut self);
-
-    // Called when the endpoint object itself should be destroyed
-    fn destroy_self(&mut self);
 
     // Called when the connection has been successfully initialized
     fn on_connect(&mut self);
@@ -655,7 +657,7 @@ impl Endpoint {
         }
     }
 
-    pub fn handle_timer<C>(&mut self, now_ms: u64, ctx: &mut C)
+    pub fn handle_rto_timer<C>(&mut self, now_ms: u64, ctx: &mut C) -> TimeoutAction
     where
         C: HostContext,
     {
@@ -677,7 +679,8 @@ impl Endpoint {
                     // the shoulder of Orion... I watched C-beams glitter in the dark near the
                     // Tannhäuser Gate. All those moments will be lost in time, like tears in
                     // rain... Time to die.
-                    ctx.destroy_self();
+
+                    TimeoutAction::Terminate
                 } else {
                     self.rto_ms *= 2;
                     self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
@@ -696,6 +699,8 @@ impl Endpoint {
 
                     // Don't waste an opportunity to send data
                     self.flush_stream(false, false, now_ms, ctx);
+
+                    TimeoutAction::Continue
                 }
             }
             StateId::Closing => {
@@ -712,7 +717,7 @@ impl Endpoint {
                     ctx.on_timeout();
 
                     // (See previous)
-                    ctx.destroy_self();
+                    TimeoutAction::Terminate
                 } else {
                     self.rto_ms *= 2;
                     self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
@@ -722,17 +727,18 @@ impl Endpoint {
 
                     // Send another close frame
                     self.send_close_frame(ctx);
+
+                    TimeoutAction::Continue
                 }
             }
             StateId::Closed => {
                 // Finished acking resent close requests and/or soaking up stray packets
                 self.state_id = StateId::Zombie;
 
-                ctx.destroy_self();
-
-                // println!("FIN");
+                // (See previous)
+                TimeoutAction::Terminate
             }
-            _ => (),
+            _ => TimeoutAction::Continue,
         }
     }
 
@@ -917,10 +923,6 @@ mod tests {
 
         fn unset_rto_timer(&mut self) {
             println!("unset rto timer");
-        }
-
-        fn destroy_self(&mut self) {
-            println!("destroy self");
         }
 
         fn on_connect(&mut self) {

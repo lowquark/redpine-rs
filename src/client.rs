@@ -155,10 +155,6 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
         self.client.rto_timer.timeout_ms = None;
     }
 
-    fn destroy_self(&mut self) {
-        self.client.state = State::Quiescent;
-    }
-
     fn on_connect(&mut self) {
         self.client.events.push_back(Event::Connect);
     }
@@ -229,7 +225,12 @@ impl ClientCore {
 
                 let ref mut host_ctx = EndpointContext::new(self);
 
-                endpoint.handle_timer(now_ms, host_ctx);
+                match endpoint.handle_rto_timer(now_ms, host_ctx) {
+                    endpoint::TimeoutAction::Continue => (),
+                    endpoint::TimeoutAction::Terminate => {
+                        self.state = State::Quiescent;
+                    }
+                }
             }
             State::Quiescent => {}
         }
