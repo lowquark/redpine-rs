@@ -2,7 +2,7 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 use std::time;
 
-use super::util::{DataPacket, SummaryPacket, Packet};
+use super::util::{DataPacket, Packet, SummaryPacket};
 
 fn run_server(port: u16, config: redpine::ServerConfig, rx: mpsc::Receiver<()>) {
     // Always bind to core zero
