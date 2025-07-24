@@ -1,3 +1,10 @@
+# 0.3.0
+
+  - Resolved a critical bug with timer scheduling
+  - Replaced the server timer wheel system with a simple and performant rotating buffer
+  - Enabled server peers to send packets concurrently as the server waits for events
+  - Replaced numeric peer IDs with arbitrary user data
+
 # 0.2.1
 
   - Added the ability for PeerHandles to be cloned and compared
