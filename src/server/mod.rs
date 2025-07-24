@@ -1,19 +1,21 @@
-use std::any;
+mod epoch;
+mod handshake_mac;
+mod peer;
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::fmt;
 use std::net;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time;
-
-use siphasher::sip;
 
 use super::endpoint;
 use super::frame;
 use super::socket;
 use super::timer_queue;
 use super::ErrorKind;
-use super::SendMode;
+
+pub use peer::PeerHandle;
+use peer::{Peer, PeerRef};
 
 const FRAME_SIZE_MAX: usize = 1472;
 
@@ -79,60 +81,6 @@ impl Config {
     }
 }
 
-struct Epoch {
-    time_base: time::Instant,
-}
-
-impl Epoch {
-    fn new() -> Self {
-        Self {
-            time_base: time::Instant::now(),
-        }
-    }
-
-    fn time_now_ms(&self) -> u64 {
-        self.time_base.elapsed().as_millis() as u64
-    }
-}
-
-struct PeerCore {
-    // Remote address
-    addr: net::SocketAddr,
-    // Independent user data associated with this peer
-    data: Option<Arc<dyn any::Any + Send + Sync>>,
-    // Server epoch
-    epoch: Arc<Epoch>,
-    // Permits sending frames from a peer handle
-    socket_tx: Arc<socket::SocketTx>,
-    // Next RTO timer expiration time
-    rto_timer: Option<u64>,
-    // Permits signaling events from a peer handle
-    events: Arc<Mutex<VecDeque<Event>>>,
-}
-
-struct Peer {
-    // Peer metadata
-    core: PeerCore,
-    // Endpoint representing this peer's connection
-    endpoint: endpoint::Endpoint,
-}
-
-type PeerRef = Arc<RwLock<Peer>>;
-
-impl timer_queue::Timer for RwLock<Peer> {
-    fn test(&self, time_now: u64) -> bool {
-        if let Ok(peer) = &mut self.write() {
-            if let Some(t) = &peer.core.rto_timer {
-                if *t < time_now {
-                    peer.core.rto_timer = None;
-                    return true;
-                }
-            }
-        }
-        false
-    }
-}
-
 type TimerQueue = timer_queue::TimerQueue<RwLock<Peer>>;
 
 /// Represents a server event.
@@ -148,20 +96,15 @@ pub enum Event {
     Error(PeerHandle, ErrorKind),
 }
 
-struct EndpointContext<'a> {
-    peer: &'a mut PeerCore,
-    peer_ref: &'a PeerRef,
-}
-
 struct ServerCore {
     // Saved configuration
     config: Config,
     // Source of integer timestamps
-    epoch: Arc<Epoch>,
+    epoch: Arc<epoch::Epoch>,
     // Socket send handle
     socket_tx: Arc<socket::SocketTx>,
-    // Key used to compute handshake MACs
-    siphash_key: [u8; 16],
+    // Used to compute handshake MACs
+    handshake_mac_hasher: handshake_mac::HandshakeMacHasher,
     // Table of connected peers
     peers: HashMap<net::SocketAddr, PeerRef>,
     // Pending timer events
@@ -178,108 +121,6 @@ pub struct Server {
     socket_rx: socket::SocketRx,
     // Always-allocated timer expiration buffer
     timer_data_buffer: Vec<PeerRef>,
-}
-
-/// Represents a connected client.
-#[derive(Clone)]
-pub struct PeerHandle {
-    peer: PeerRef,
-}
-
-impl Peer {
-    fn new(
-        addr: net::SocketAddr,
-        endpoint_config: endpoint::Config,
-        epoch: Arc<Epoch>,
-        socket_tx: Arc<socket::SocketTx>,
-        events: Arc<Mutex<VecDeque<Event>>>,
-    ) -> Self {
-        Self {
-            core: PeerCore {
-                addr,
-                data: None,
-                epoch,
-                socket_tx,
-                events,
-                rto_timer: None,
-            },
-            endpoint: endpoint::Endpoint::new(endpoint_config),
-        }
-    }
-}
-
-impl<'a> EndpointContext<'a> {
-    fn new(peer: &'a mut PeerCore, peer_ref: &'a PeerRef) -> Self {
-        Self { peer, peer_ref }
-    }
-}
-
-impl<'a> endpoint::HostContext for EndpointContext<'a> {
-    fn send_frame(&mut self, frame_bytes: &[u8]) {
-        // println!("{:?} <- {:02X?}", self.peer.addr, frame_bytes);
-        self.peer.socket_tx.send(frame_bytes, &self.peer.addr);
-    }
-
-    fn set_rto_timer(&mut self, time_ms: u64) {
-        self.peer.rto_timer = Some(time_ms);
-    }
-
-    fn unset_rto_timer(&mut self) {
-        self.peer.rto_timer = None;
-    }
-
-    fn on_connect(&mut self) {
-        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
-        let event = Event::Connect(handle);
-        self.peer.events.lock().unwrap().push_back(event);
-    }
-
-    fn on_disconnect(&mut self) {
-        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
-        let event = Event::Disconnect(handle);
-        self.peer.events.lock().unwrap().push_back(event);
-    }
-
-    fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
-        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
-        let event = Event::Receive(handle, packet_bytes);
-        self.peer.events.lock().unwrap().push_back(event);
-    }
-
-    fn on_timeout(&mut self) {
-        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
-        let event = Event::Error(handle, ErrorKind::Timeout);
-        self.peer.events.lock().unwrap().push_back(event);
-    }
-}
-
-fn compute_mac(
-    key: &[u8; 16],
-    sender_addr: &net::SocketAddr,
-    client_nonce: u32,
-    server_nonce: u32,
-    server_timestamp: u32,
-) -> u64 {
-    use core::hash::Hasher;
-
-    let mut hasher = sip::SipHasher13::new_with_key(key);
-
-    match sender_addr {
-        net::SocketAddr::V4(addr) => {
-            hasher.write(&addr.ip().octets());
-            hasher.write_u16(addr.port());
-        }
-        net::SocketAddr::V6(addr) => {
-            hasher.write(&addr.ip().octets());
-            hasher.write_u16(addr.port());
-        }
-    }
-
-    hasher.write_u32(client_nonce);
-    hasher.write_u32(server_nonce);
-    hasher.write_u32(server_timestamp);
-
-    return hasher.finish();
 }
 
 fn connection_params_compatible(a: &frame::ConnectionParams, b: &frame::ConnectionParams) -> bool {
@@ -308,17 +149,13 @@ impl ServerCore {
 
     /// Processes all pending timer events.
     pub fn handle_timeouts(&mut self, timer_data_buffer: &mut Vec<PeerRef>) {
-        let now_ms = self.step_timer_wheel(timer_data_buffer);
+        self.step_timer_wheel(timer_data_buffer);
 
         for peer_ref in timer_data_buffer.drain(..) {
-            let ref mut peer = *peer_ref.write().unwrap();
-
-            let ref mut ctx = EndpointContext::new(&mut peer.core, &peer_ref);
-
-            match peer.endpoint.handle_rto_timer(now_ms, ctx) {
+            match peer::handle_rto_timer(&peer_ref) {
                 endpoint::TimeoutAction::Continue => (),
                 endpoint::TimeoutAction::Terminate => {
-                    self.peers.remove(&peer.core.addr);
+                    self.peers.remove(peer_ref.read().unwrap().addr());
                 }
             }
         }
@@ -355,8 +192,7 @@ impl ServerCore {
                     client_nonce,
                     server_nonce,
                     server_timestamp,
-                    server_mac: compute_mac(
-                        &self.siphash_key,
+                    server_mac: self.handshake_mac_hasher.compute(
                         sender_addr,
                         client_nonce,
                         server_nonce,
@@ -392,8 +228,7 @@ impl ServerCore {
         if let Some(frame) = frame::HandshakeBetaFrame::read(payload_bytes) {
             let timestamp_now = now_ms as u32;
 
-            let computed_mac = compute_mac(
-                &self.siphash_key,
+            let computed_mac = self.handshake_mac_hasher.compute(
                 sender_addr,
                 frame.client_nonce,
                 frame.server_nonce,
@@ -443,18 +278,8 @@ impl ServerCore {
                     // Add to the timer queue
                     self.timer_queue.add_timer(Arc::downgrade(&peer_ref));
 
-                    // Initialize endpoint
-
-                    let now_ms = self.epoch.time_now_ms();
-
-                    let ref mut peer = *peer_ref.write().unwrap();
-
-                    let ref mut endpoint = peer.endpoint;
-                    let ref mut peer_core = peer.core;
-
-                    let ref mut ctx = EndpointContext::new(peer_core, &peer_ref);
-
-                    endpoint.init(now_ms, ctx);
+                    // Initialize
+                    peer::init(&peer_ref);
 
                     None
                 };
@@ -479,7 +304,6 @@ impl ServerCore {
         frame_type: frame::FrameType,
         frame_bytes: &[u8],
         sender_addr: &net::SocketAddr,
-        now_ms: u64,
     ) {
         // If a peer is associated with this address, deliver this frame to its endpoint
         if let Some(peer_ref) = self.peers.get(sender_addr) {
@@ -489,16 +313,7 @@ impl ServerCore {
 
             let payload_bytes = frame::serial::payload(frame_bytes);
 
-            let peer_ref = Arc::clone(&peer_ref);
-
-            let ref mut peer = *peer_ref.write().unwrap();
-
-            let ref mut endpoint = peer.endpoint;
-            let ref mut peer_core = peer.core;
-
-            let ref mut ctx = EndpointContext::new(peer_core, &peer_ref);
-
-            endpoint.handle_frame(frame_type, payload_bytes, now_ms, ctx);
+            peer::handle_frame(peer_ref, frame_type, payload_bytes);
         }
     }
 
@@ -525,7 +340,7 @@ impl ServerCore {
                     self.handle_handshake_beta(frame_bytes, sender_addr, now_ms);
                 }
                 _ => {
-                    self.handle_frame_other(frame_type, frame_bytes, sender_addr, now_ms);
+                    self.handle_frame_other(frame_type, frame_bytes, sender_addr);
                 }
             }
         }
@@ -572,27 +387,15 @@ impl Server {
     {
         config.validate();
 
-        let epoch = Epoch::new();
+        let epoch = epoch::Epoch::new();
 
         let (socket_tx, socket_rx) = socket::new(bind_addr, FRAME_SIZE_MAX)?;
 
-        // This samples the thread-local RNG, which is a CSPRNG (see docs for rand::rngs::StdRng)
-        let siphash_key = (0..16)
-            .map(|_| rand::random::<u8>())
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-
-        // In order to do interesting things with Peer objects, PeerHandles require Peers to keep a
-        // (weak) pointer to the ServerCore object. The most convenient way to accomplish this is
-        // to give ServerCore a weak pointer to itself that can be cloned upon Peer construction.
-        // The alternative is to pass pointers to the ServerCore down the frame handling call
-        // stack, which is cumbersome.
         let core = ServerCore {
             config,
             epoch: Arc::new(epoch),
             socket_tx: Arc::new(socket_tx),
-            siphash_key,
+            handshake_mac_hasher: Default::default(),
             peers: Default::default(),
             timer_queue: Default::default(),
             events: Default::default(),
@@ -693,82 +496,5 @@ impl Server {
     /// *Note*: Peers may exist in the peer table for some time after they have disconnected.
     pub fn peer_count(&self) -> usize {
         self.core.peers.len()
-    }
-}
-
-impl PeerHandle {
-    fn new(peer: PeerRef) -> Self {
-        Self { peer }
-    }
-
-    /// Returns the user data associated with this peer.
-    pub fn data(&self) -> Option<Arc<dyn any::Any + Send + Sync>> {
-        self.peer.read().unwrap().core.data.clone()
-    }
-
-    /// Associates user data with this peer.
-    pub fn set_data(&self, data: Option<Arc<dyn any::Any + Send + Sync>>) {
-        self.peer.write().unwrap().core.data = data;
-    }
-
-    /// Equivalent to calling [`PeerHandle::enqueue`] followed by [`PeerHandle::flush`].
-    ///
-    /// *Note*: When sending many packets, it is more efficient to call `enqueue` multiple times
-    /// followed by a final call to `flush`.
-    pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        let ref mut peer = *self.peer.write().unwrap();
-
-        let now_ms = peer.core.epoch.time_now_ms();
-
-        let ref mut ctx = EndpointContext::new(&mut peer.core, &self.peer);
-
-        peer.endpoint.enqueue(packet_bytes, mode, now_ms);
-        peer.endpoint.flush(now_ms, ctx);
-    }
-
-    /// Enqueues a packet to be sent to this peer.
-    pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        let ref mut peer = *self.peer.write().unwrap();
-
-        let now_ms = peer.core.epoch.time_now_ms();
-
-        peer.endpoint.enqueue(packet_bytes, mode, now_ms);
-    }
-
-    /// Sends as much data as possible for this peer on the underlying socket.
-    pub fn flush(&mut self) {
-        let ref mut peer = *self.peer.write().unwrap();
-
-        let now_ms = peer.core.epoch.time_now_ms();
-
-        let ref mut ctx = EndpointContext::new(&mut peer.core, &self.peer);
-
-        peer.endpoint.flush(now_ms, ctx);
-    }
-
-    /// Disconnects this peer gracefully. No more packets will be sent or received once this
-    /// function has been called.
-    pub fn disconnect(&mut self) {
-        let ref mut peer = *self.peer.write().unwrap();
-
-        let now_ms = peer.core.epoch.time_now_ms();
-
-        let ref mut ctx = EndpointContext::new(&mut peer.core, &self.peer);
-
-        peer.endpoint.disconnect(now_ms, ctx);
-    }
-}
-
-impl std::cmp::PartialEq for PeerHandle {
-    fn eq(&self, other: &PeerHandle) -> bool {
-        Arc::ptr_eq(&self.peer, &other.peer)
-    }
-}
-
-impl std::cmp::Eq for PeerHandle {}
-
-impl std::fmt::Debug for PeerHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PeerHandle").finish()
     }
 }
