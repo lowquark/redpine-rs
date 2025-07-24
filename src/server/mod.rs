@@ -178,8 +178,8 @@ impl ServerCore {
         if let Some(frame) = frame::HandshakeAlphaFrame::read(payload_bytes) {
             if frame.protocol_id == frame::serial::PROTOCOL_ID {
                 let server_params = frame::ConnectionParams {
-                    packet_size_in_max: u32::max_value(),
-                    packet_size_out_max: u32::max_value(),
+                    packet_size_in_max: u32::MAX,
+                    packet_size_out_max: u32::MAX,
                 };
                 let client_nonce = frame.client_nonce;
                 let server_nonce = rand::random::<u32>();
@@ -239,8 +239,8 @@ impl ServerCore {
 
             if mac_valid && timestamp_valid {
                 let server_params = frame::ConnectionParams {
-                    packet_size_in_max: u32::max_value(),
-                    packet_size_out_max: u32::max_value(),
+                    packet_size_in_max: u32::MAX,
+                    packet_size_out_max: u32::MAX,
                 };
 
                 let params_compatible =

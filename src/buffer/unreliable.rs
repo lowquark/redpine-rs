@@ -243,7 +243,7 @@ mod tests {
         let mut send_buf = TxBuffer::new(initial_base_id, fragment_size);
 
         // Enqueue a single packet
-        send_buf.push(packet_data.clone(), u64::max_value());
+        send_buf.push(packet_data.clone(), u64::MAX);
 
         let packet_data_rc = Arc::new(packet_data.clone());
 

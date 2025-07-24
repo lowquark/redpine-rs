@@ -19,7 +19,7 @@ pub const STREAM_ACK_SIZE: usize = 9;
 pub const STREAM_SYNC_SIZE: usize = 4;
 
 const DATAGRAM_HEADER_SIZE: usize = 1 + 4 + 2;
-const DATAGRAM_DATA_SIZE_MAX: usize = u16::max_value() as usize;
+const DATAGRAM_DATA_SIZE_MAX: usize = u16::MAX as usize;
 const DATAGRAM_UNREL_BIT: u8 = 0x01;
 const DATAGRAM_FIRST_BIT: u8 = 0x02;
 const DATAGRAM_LAST_BIT: u8 = 0x04;
@@ -309,7 +309,7 @@ impl BlockSerial for HandshakeBetaAckFrame {
         let error = match status {
             0x00 => None,
             0x01 => Some(HandshakeErrorKind::Capacity),
-            0x02 | _ => Some(HandshakeErrorKind::Parameter),
+            _ => Some(HandshakeErrorKind::Parameter),
         };
 
         Self {

@@ -20,7 +20,7 @@ fn main() {
                     println!("ServerEvent::Disconnect");
                 }
                 redpine::ServerEvent::Receive(mut peer, packet_bytes) => {
-                    println!("ServerEvent::Receive {:02X?}", packet_bytes);
+                    println!("ServerEvent::Receive {packet_bytes:02X?}");
 
                     peer.send(packet_bytes, redpine::SendMode::Unreliable(0));
                 }

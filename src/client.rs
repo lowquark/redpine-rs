@@ -255,8 +255,8 @@ impl ClientCore {
         if let State::Handshake(ref mut state) = self.state { if let HandshakePhase::Alpha = state.phase {
             if let Some(frame) = frame::HandshakeAlphaAckFrame::read(payload_bytes) {
                 let client_params = frame::ConnectionParams {
-                    packet_size_in_max: u32::max_value(),
-                    packet_size_out_max: u32::max_value(),
+                    packet_size_in_max: u32::MAX,
+                    packet_size_out_max: u32::MAX,
                 };
 
                 let nonce_valid = frame.client_nonce == state.local_nonce;

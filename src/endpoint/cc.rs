@@ -20,7 +20,7 @@ pub struct AimdReno {
 impl AimdReno {
     pub fn new(mss: usize) -> Self {
         // (mss * mss) << 32 must be a valid u64
-        assert!(mss <= u16::max_value().into());
+        assert!(mss <= u16::MAX.into());
 
         Self {
             mode: Mode::UnboundedSlowStart,
@@ -100,7 +100,7 @@ impl AimdReno {
         if let Ok(cwnd_int) = cwnd_int.try_into() {
             cwnd_int
         } else {
-            usize::max_value()
+            usize::MAX
         }
     }
 }

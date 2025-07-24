@@ -376,7 +376,7 @@ impl Endpoint {
 
                 self.rto_ms = (rtt_state.srtt_ms + G_MS.max(K * rtt_state.rttvar_ms)).ceil() as u64;
 
-                self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
+                self.rto_ms = self.rto_ms.clamp(RTO_MIN_MS, RTO_MAX_MS);
 
                 self.rtt_timer_state = None;
             } else if state.expire_time_ms <= now_ms {
@@ -678,7 +678,7 @@ impl Endpoint {
                     TimeoutAction::Terminate
                 } else {
                     self.rto_ms *= 2;
-                    self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
+                    self.rto_ms = self.rto_ms.clamp(RTO_MIN_MS, RTO_MAX_MS);
 
                     ctx.set_rto_timer(now_ms + self.rto_ms);
                     timer_state.rto_ms = self.rto_ms;
@@ -715,7 +715,7 @@ impl Endpoint {
                     TimeoutAction::Terminate
                 } else {
                     self.rto_ms *= 2;
-                    self.rto_ms = self.rto_ms.max(RTO_MIN_MS).min(RTO_MAX_MS);
+                    self.rto_ms = self.rto_ms.clamp(RTO_MIN_MS, RTO_MAX_MS);
 
                     ctx.set_rto_timer(now_ms + self.rto_ms);
                     timer_state.rto_ms = self.rto_ms;
