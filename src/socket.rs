@@ -48,12 +48,12 @@ impl SocketTx {
 impl SocketRx {
     /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
     /// otherwise.
-    pub fn try_read_frame<'a>(
-        &'a mut self,
-    ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
+    pub fn try_read_frame(
+        &mut self,
+    ) -> std::io::Result<Option<(&[u8], net::SocketAddr)>> {
         match self.socket.recv_from(&mut self.recv_buffer) {
             Ok((frame_len, sender_addr)) => {
-                let ref frame_bytes = self.recv_buffer[..frame_len];
+                let frame_bytes = &self.recv_buffer[..frame_len];
                 Ok(Some((frame_bytes, sender_addr)))
             }
             Err(err) => match err.kind() {
@@ -66,10 +66,10 @@ impl SocketRx {
 
     /// Blocks for a duration of up to `timeout` for an incoming frame and returns it. Returns
     /// Ok(None) if no frame could be read in the alloted time, or if polling awoke spuriously.
-    pub fn wait_for_frame<'a>(
-        &'a mut self,
+    pub fn wait_for_frame(
+        &mut self,
         timeout: Option<time::Duration>,
-    ) -> std::io::Result<Option<(&'a [u8], net::SocketAddr)>> {
+    ) -> std::io::Result<Option<(&[u8], net::SocketAddr)>> {
         // Wait for a readable event (must be done prior to each wait() call)
         // TODO: Does this work if the socket is already readable?
         self.poller
@@ -133,10 +133,10 @@ impl ConnectedSocketTx {
 impl ConnectedSocketRx {
     /// If a valid frame can be read from the socket, returns the frame. Returns Ok(None)
     /// otherwise.
-    pub fn try_read_frame<'a>(&'a mut self) -> std::io::Result<Option<&'a [u8]>> {
+    pub fn try_read_frame(&mut self) -> std::io::Result<Option<&[u8]>> {
         match self.socket.recv(&mut self.recv_buffer) {
             Ok(frame_len) => {
-                let ref frame_bytes = self.recv_buffer[..frame_len];
+                let frame_bytes = &self.recv_buffer[..frame_len];
                 Ok(Some(frame_bytes))
             }
             Err(err) => match err.kind() {
@@ -149,10 +149,10 @@ impl ConnectedSocketRx {
 
     /// Blocks for a duration of up to `timeout` for an incoming frame and returns it. Returns
     /// Ok(None) if no frame could be read in the alloted time, or if polling awoke spuriously.
-    pub fn wait_for_frame<'a>(
-        &'a mut self,
+    pub fn wait_for_frame(
+        &mut self,
         timeout: Option<time::Duration>,
-    ) -> std::io::Result<Option<&'a [u8]>> {
+    ) -> std::io::Result<Option<&[u8]>> {
         // Wait for a readable event (must be done prior to each wait() call)
         // TODO: Does this work if the socket is already readable?
         self.poller

@@ -70,7 +70,7 @@ impl SegmentTx {
         let bit_idx = self.next_id % 64;
         let bit_mask = 1u64 << (63 - bit_idx);
 
-        let ref mut bitfield = self.nonce_buf[(idx & self.nonce_buf_mask) as usize];
+        let bitfield = &mut self.nonce_buf[(idx & self.nonce_buf_mask) as usize];
 
         if nonce {
             *bitfield |= bit_mask;
@@ -134,42 +134,40 @@ impl SegmentTx {
             let mask = (1u64 << new_bits) - 1;
 
             x_new |= ((bitfield >> shift) & mask) as u32;
+        } else if p1_bits == 0 {
+            // New bits come from bitfield A only
+
+            // A               B
+            // ################%%%%%%%%%%%%%%%%
+            // history xx------
+            //           ^     ^
+            //           p0    p1
+
+            let bitfield = self.nonce_buf[(p0_idx & self.nonce_buf_mask) as usize];
+
+            let mask = (1u64 << new_bits) - 1;
+
+            x_new |= (bitfield & mask) as u32;
         } else {
-            if p1_bits == 0 {
-                // New bits come from bitfield A only
+            // New bits come from bitfields A and B
 
-                // A               B
-                // ################%%%%%%%%%%%%%%%%
-                // history xx------
-                //           ^     ^
-                //           p0    p1
+            // A               B
+            // ################%%%%%%%%%%%%%%%%
+            //    history xx------
+            //              ^     ^
+            //              p0    p1
 
-                let bitfield = self.nonce_buf[(p0_idx & self.nonce_buf_mask) as usize];
+            let bitfield_a = self.nonce_buf[(p0_idx & self.nonce_buf_mask) as usize];
+            let bitfield_b = self.nonce_buf[(p1_idx & self.nonce_buf_mask) as usize];
 
-                let mask = (1u64 << new_bits) - 1;
+            let mask_a = (1u64 << (new_bits - p1_bits)) - 1;
+            let mask_b = (1u64 << p1_bits) - 1;
 
-                x_new |= (bitfield & mask) as u32;
-            } else {
-                // New bits come from bitfields A and B
+            let shift_a = p1_bits;
+            let shift_b = 64 - p1_bits;
 
-                // A               B
-                // ################%%%%%%%%%%%%%%%%
-                //    history xx------
-                //              ^     ^
-                //              p0    p1
-
-                let bitfield_a = self.nonce_buf[(p0_idx & self.nonce_buf_mask) as usize];
-                let bitfield_b = self.nonce_buf[(p1_idx & self.nonce_buf_mask) as usize];
-
-                let mask_a = (1u64 << (new_bits - p1_bits)) - 1;
-                let mask_b = (1u64 << p1_bits) - 1;
-
-                let shift_a = p1_bits;
-                let shift_b = 64 - p1_bits;
-
-                x_new |= ((bitfield_b >> shift_b) & mask_b) as u32;
-                x_new |= ((bitfield_a & mask_a) << shift_a) as u32;
-            }
+            x_new |= ((bitfield_b >> shift_b) & mask_b) as u32;
+            x_new |= ((bitfield_a & mask_a) << shift_a) as u32;
         }
 
         self.nonce_history = x_new;
@@ -242,10 +240,10 @@ impl SegmentTx {
             // Three segments have been reported since the first unacknowledged segment, that's
             // equivalent to a TCP NDUPACK=3 condition
             self.ack_history = u32::MAX;
-            return true;
+            true
         } else {
             // Not a drop, yet
-            return false;
+            false
         }
     }
 
@@ -278,7 +276,7 @@ impl SegmentTx {
         }
 
         // Invalid ack, not a drop
-        return false;
+        false
     }
 }
 

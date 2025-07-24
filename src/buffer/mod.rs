@@ -17,7 +17,7 @@ impl Window {
 
     pub fn contains(&self, id: u32) -> bool {
         let delta = id.wrapping_sub(self.base_id);
-        return delta < self.size;
+        delta < self.size
     }
 }
 

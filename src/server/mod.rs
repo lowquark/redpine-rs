@@ -68,13 +68,11 @@ impl Config {
         );
         assert!(
             self.peer_count_max <= PEER_COUNT_MAX_MAX,
-            "invalid server configuration: peer_count_max > {}",
-            PEER_COUNT_MAX_MAX
+            "invalid server configuration: peer_count_max > {PEER_COUNT_MAX_MAX}"
         );
         assert!(
             self.connection_timeout_ms >= CONNECTION_TIMEOUT_MIN_MS,
-            "invalid server configuration: connection_timeout_ms < {}",
-            CONNECTION_TIMEOUT_MIN_MS
+            "invalid server configuration: connection_timeout_ms < {CONNECTION_TIMEOUT_MIN_MS}"
         );
 
         self.channel_balance.validate();
@@ -135,7 +133,7 @@ impl ServerCore {
             timer_data_buffer.push(Arc::clone(peer))
         });
 
-        return now_ms;
+        now_ms
     }
 
     /// Returns a duration representing the time until the next timer event, if one exists.
@@ -187,7 +185,7 @@ impl ServerCore {
                 let server_nonce = rand::random::<u32>();
                 let server_timestamp = now_ms as u32;
 
-                let ref ack_frame = frame::HandshakeAlphaAckFrame {
+                let ack_frame = &frame::HandshakeAlphaAckFrame {
                     server_params,
                     client_nonce,
                     server_nonce,
@@ -200,11 +198,11 @@ impl ServerCore {
                     ),
                 };
 
-                let ref mut buffer = [0u8; frame::HandshakeAlphaAckFrame::FRAME_SIZE];
+                let buffer = &mut [0u8; frame::HandshakeAlphaAckFrame::FRAME_SIZE];
                 let ack_frame_bytes = ack_frame.write(buffer);
 
                 // println!("acking phase α...");
-                self.socket_tx.send(&ack_frame_bytes, sender_addr);
+                self.socket_tx.send(ack_frame_bytes, sender_addr);
             }
         }
     }
@@ -262,7 +260,7 @@ impl ServerCore {
 
                     // Create new peer object
                     let peer = Peer::new(
-                        sender_addr.clone(),
+                        *sender_addr,
                         endpoint_config,
                         Arc::clone(&self.epoch),
                         Arc::clone(&self.socket_tx),
@@ -273,7 +271,7 @@ impl ServerCore {
 
                     // Associate with given address
                     self.peers
-                        .insert(sender_addr.clone(), Arc::clone(&peer_ref));
+                        .insert(*sender_addr, Arc::clone(&peer_ref));
 
                     // Add to the timer queue
                     self.timer_queue.add_timer(Arc::downgrade(&peer_ref));
@@ -285,16 +283,16 @@ impl ServerCore {
                 };
 
                 // Always send an ack in case a previous ack was dropped
-                let ref ack_frame = frame::HandshakeBetaAckFrame {
+                let ack_frame = &frame::HandshakeBetaAckFrame {
                     client_nonce: frame.client_nonce,
                     error,
                 };
 
-                let ref mut buffer = [0u8; frame::HandshakeBetaAckFrame::FRAME_SIZE];
+                let buffer = &mut [0u8; frame::HandshakeBetaAckFrame::FRAME_SIZE];
                 let ack_frame_bytes = ack_frame.write(buffer);
 
                 // println!("acking phase β...");
-                self.socket_tx.send(&ack_frame_bytes, sender_addr);
+                self.socket_tx.send(ack_frame_bytes, sender_addr);
             }
         }
     }
@@ -413,7 +411,7 @@ impl Server {
     ///
     /// Returns `None` if no events are available.
     pub fn poll_event(&mut self) -> Option<Event> {
-        let ref mut core = self.core;
+        let core = &mut self.core;
 
         if core.events.lock().unwrap().is_empty() {
             core.handle_frames(&mut self.socket_rx);
@@ -427,7 +425,7 @@ impl Server {
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned.
     pub fn wait_event(&mut self) -> Event {
-        let ref mut core = self.core;
+        let core = &mut self.core;
 
         loop {
             let wait_timeout = core.next_timer_timeout();
@@ -448,7 +446,7 @@ impl Server {
     ///
     /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
-        let ref mut core = self.core;
+        let core = &mut self.core;
 
         if core.events.lock().unwrap().is_empty() {
             let mut remaining_timeout = timeout;

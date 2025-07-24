@@ -98,57 +98,55 @@ impl SegmentRx {
                 cb(new_data);
                 self.push_history_ack(new_nonce);
                 self.advance_window_past(new_id);
-            } else {
-                if self.len == 0 {
-                    // Add segment to empty buffer
-                    Self::save_segment(&mut self.slot_0, new_id, new_nonce, new_data);
+            } else if self.len == 0 {
+                // Add segment to empty buffer
+                Self::save_segment(&mut self.slot_0, new_id, new_nonce, new_data);
 
-                    self.len = 1;
-                    return self.len;
-                } else if self.len == 1 {
-                    // Add segment to buffer if unique
-                    if self.slot_0.id != new_id {
-                        Self::save_segment(&mut self.slot_1, new_id, new_nonce, new_data);
+                self.len = 1;
+                return self.len;
+            } else if self.len == 1 {
+                // Add segment to buffer if unique
+                if self.slot_0.id != new_id {
+                    Self::save_segment(&mut self.slot_1, new_id, new_nonce, new_data);
 
-                        self.len = 2;
+                    self.len = 2;
+
+                    self.swap_slots_if_backward();
+                }
+
+                return self.len;
+            } else if self.len == 2 {
+                // Push & pop segments if unique
+                if self.slot_0.id != new_id && self.slot_1.id != new_id {
+                    let new_delta = new_id.wrapping_sub(self.window.base_id);
+                    let slot_0_delta = self.slot_0.id.wrapping_sub(self.window.base_id);
+
+                    if new_delta < slot_0_delta {
+                        // The latest segment is the newest of the three
+                        // (This skips unreceived segments)
+                        cb(new_data);
+
+                        self.push_history_skips(new_delta);
+                        self.push_history_ack(new_nonce);
+                        self.advance_window_past(new_id);
+                    } else {
+                        // The first segment in the buffer is the newest of the three
+                        // (This skips unreceived segments)
+
+                        let slot_0_data = &self.slot_0.data[..self.slot_0.len];
+                        cb(slot_0_data);
+
+                        self.push_history_skips(slot_0_delta);
+                        self.push_history_ack(self.slot_0.nonce);
+                        self.advance_window_past(self.slot_0.id);
+
+                        Self::save_segment(&mut self.slot_0, new_id, new_nonce, new_data);
 
                         self.swap_slots_if_backward();
                     }
-
-                    return self.len;
-                } else if self.len == 2 {
-                    // Push & pop segments if unique
-                    if self.slot_0.id != new_id && self.slot_1.id != new_id {
-                        let new_delta = new_id.wrapping_sub(self.window.base_id);
-                        let slot_0_delta = self.slot_0.id.wrapping_sub(self.window.base_id);
-
-                        if new_delta < slot_0_delta {
-                            // The latest segment is the newest of the three
-                            // (This skips unreceived segments)
-                            cb(new_data);
-
-                            self.push_history_skips(new_delta);
-                            self.push_history_ack(new_nonce);
-                            self.advance_window_past(new_id);
-                        } else {
-                            // The first segment in the buffer is the newest of the three
-                            // (This skips unreceived segments)
-
-                            let slot_0_data = &self.slot_0.data[..self.slot_0.len];
-                            cb(slot_0_data);
-
-                            self.push_history_skips(slot_0_delta);
-                            self.push_history_ack(self.slot_0.nonce);
-                            self.advance_window_past(self.slot_0.id);
-
-                            Self::save_segment(&mut self.slot_0, new_id, new_nonce, new_data);
-
-                            self.swap_slots_if_backward();
-                        }
-                    }
-                } else {
-                    panic!("invalid buffer length")
                 }
+            } else {
+                panic!("invalid buffer length")
             }
 
             // Deliver all segments in the buffer which match the next expected ID
@@ -167,7 +165,7 @@ impl SegmentRx {
             }
         }
 
-        return self.len;
+        self.len
     }
 
     pub fn sync<F>(&mut self, next_segment_id: u32, mut cb: F)

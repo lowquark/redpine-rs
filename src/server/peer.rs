@@ -88,25 +88,25 @@ impl<'a> endpoint::HostContext for EndpointContext<'a> {
     }
 
     fn on_connect(&mut self) {
-        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
+        let handle = PeerHandle::new(Arc::clone(self.peer_ref));
         let event = Event::Connect(handle);
         self.peer.events.lock().unwrap().push_back(event);
     }
 
     fn on_disconnect(&mut self) {
-        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
+        let handle = PeerHandle::new(Arc::clone(self.peer_ref));
         let event = Event::Disconnect(handle);
         self.peer.events.lock().unwrap().push_back(event);
     }
 
     fn on_receive(&mut self, packet_bytes: Box<[u8]>) {
-        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
+        let handle = PeerHandle::new(Arc::clone(self.peer_ref));
         let event = Event::Receive(handle, packet_bytes);
         self.peer.events.lock().unwrap().push_back(event);
     }
 
     fn on_timeout(&mut self) {
-        let handle = PeerHandle::new(Arc::clone(&self.peer_ref));
+        let handle = PeerHandle::new(Arc::clone(self.peer_ref));
         let event = Event::Error(handle, ErrorKind::Timeout);
         self.peer.events.lock().unwrap().push_back(event);
     }
@@ -154,11 +154,11 @@ impl PeerHandle {
     /// *Note*: When sending many packets, it is more efficient to call `enqueue` multiple times
     /// followed by a final call to `flush`.
     pub fn send(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        let ref mut peer = *self.peer.write().unwrap();
+        let peer = &mut (*self.peer.write().unwrap());
 
         let now_ms = peer.core.epoch.time_now_ms();
 
-        let ref mut ctx = EndpointContext::new(&mut peer.core, &self.peer);
+        let ctx = &mut EndpointContext::new(&mut peer.core, &self.peer);
 
         peer.endpoint.enqueue(packet_bytes, mode, now_ms);
         peer.endpoint.flush(now_ms, ctx);
@@ -166,7 +166,7 @@ impl PeerHandle {
 
     /// Enqueues a packet to be sent to this peer.
     pub fn enqueue(&mut self, packet_bytes: Box<[u8]>, mode: SendMode) {
-        let ref mut peer = *self.peer.write().unwrap();
+        let peer = &mut (*self.peer.write().unwrap());
 
         let now_ms = peer.core.epoch.time_now_ms();
 
@@ -175,11 +175,11 @@ impl PeerHandle {
 
     /// Sends as much data as possible for this peer on the underlying socket.
     pub fn flush(&mut self) {
-        let ref mut peer = *self.peer.write().unwrap();
+        let peer = &mut (*self.peer.write().unwrap());
 
         let now_ms = peer.core.epoch.time_now_ms();
 
-        let ref mut ctx = EndpointContext::new(&mut peer.core, &self.peer);
+        let ctx = &mut EndpointContext::new(&mut peer.core, &self.peer);
 
         peer.endpoint.flush(now_ms, ctx);
     }
@@ -187,11 +187,11 @@ impl PeerHandle {
     /// Disconnects this peer gracefully. No more packets will be sent or received once this
     /// function has been called.
     pub fn disconnect(&mut self) {
-        let ref mut peer = *self.peer.write().unwrap();
+        let peer = &mut (*self.peer.write().unwrap());
 
         let now_ms = peer.core.epoch.time_now_ms();
 
-        let ref mut ctx = EndpointContext::new(&mut peer.core, &self.peer);
+        let ctx = &mut EndpointContext::new(&mut peer.core, &self.peer);
 
         peer.endpoint.disconnect(now_ms, ctx);
     }
@@ -212,37 +212,37 @@ impl std::fmt::Debug for PeerHandle {
 }
 
 pub fn init(peer_ref: &PeerRef) {
-    let ref mut peer = *peer_ref.write().unwrap();
+    let peer = &mut (*peer_ref.write().unwrap());
 
-    let ref mut endpoint = peer.endpoint;
-    let ref mut peer_core = peer.core;
+    let endpoint = &mut peer.endpoint;
+    let peer_core = &mut peer.core;
 
     let now_ms = peer_core.epoch.time_now_ms();
 
-    let ref mut ctx = EndpointContext::new(peer_core, peer_ref);
+    let ctx = &mut EndpointContext::new(peer_core, peer_ref);
 
     endpoint.init(now_ms, ctx);
 }
 
 pub fn handle_frame(peer_ref: &PeerRef, frame_type: frame::FrameType, payload_bytes: &[u8]) {
-    let ref mut peer = *peer_ref.write().unwrap();
+    let peer = &mut (*peer_ref.write().unwrap());
 
-    let ref mut endpoint = peer.endpoint;
-    let ref mut peer_core = peer.core;
+    let endpoint = &mut peer.endpoint;
+    let peer_core = &mut peer.core;
 
     let now_ms = peer_core.epoch.time_now_ms();
 
-    let ref mut ctx = EndpointContext::new(peer_core, &peer_ref);
+    let ctx = &mut EndpointContext::new(peer_core, peer_ref);
 
     endpoint.handle_frame(frame_type, payload_bytes, now_ms, ctx);
 }
 
 pub fn handle_rto_timer(peer_ref: &PeerRef) -> endpoint::TimeoutAction {
-    let ref mut peer = *peer_ref.write().unwrap();
+    let peer = &mut (*peer_ref.write().unwrap());
 
     let now_ms = peer.core.epoch.time_now_ms();
 
-    let ref mut ctx = EndpointContext::new(&mut peer.core, &peer_ref);
+    let ctx = &mut EndpointContext::new(&mut peer.core, peer_ref);
 
     peer.endpoint.handle_rto_timer(now_ms, ctx)
 }

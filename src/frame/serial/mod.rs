@@ -156,7 +156,7 @@ impl<'a> Writer<'a> {
 
     pub unsafe fn write_slice(&mut self, bytes: &[u8]) {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.ptr, bytes.len());
-        self.ptr = self.ptr.offset(bytes.len() as isize);
+        self.ptr = self.ptr.add(bytes.len());
         self.bytes_written += bytes.len();
     }
 }
@@ -188,7 +188,7 @@ where
             return None;
         }
 
-        let ref mut rd = Reader::new(buffer);
+        let rd = &mut Reader::new(buffer);
 
         let obj = unsafe { T::read(rd) };
 
@@ -210,7 +210,7 @@ where
 
         debug_assert_eq!(wr.bytes_written(), T::SIZE);
 
-        return Some(wr.bytes_written());
+        Some(wr.bytes_written())
     }
 }
 
@@ -450,7 +450,7 @@ impl<'a> Serial<'a> for Datagram<'a> {
             return None;
         }
 
-        return Some((
+        Some((
             Datagram {
                 id,
                 unrel: info_bits & DATAGRAM_UNREL_BIT != 0,
@@ -459,7 +459,7 @@ impl<'a> Serial<'a> for Datagram<'a> {
                 data: &src[DATAGRAM_HEADER_SIZE..DATAGRAM_HEADER_SIZE + data_len],
             },
             DATAGRAM_HEADER_SIZE + data_len,
-        ));
+        ))
     }
 
     fn write(dst: &mut [u8], obj: &Self) -> Option<usize> {
@@ -493,7 +493,7 @@ impl<'a> Serial<'a> for Datagram<'a> {
             wr.write_slice(obj.data);
         }
 
-        return Some(DATAGRAM_HEADER_SIZE + obj.data.len());
+        Some(DATAGRAM_HEADER_SIZE + obj.data.len())
     }
 }
 
@@ -546,14 +546,14 @@ impl<'a> FrameWriter<'a> {
             return true;
         }
 
-        return false;
+        false
     }
 
     pub fn finalize(self) -> &'a [u8] {
-        let ref payload = self.buffer[..self.write_idx];
+        let payload = &self.buffer[..self.write_idx];
 
         let frame_crc = crc::compute(payload);
-        let ref frame_crc_bytes = frame_crc.to_le_bytes();
+        let frame_crc_bytes = &frame_crc.to_le_bytes();
 
         let frame_size = self.write_idx + crc::SIZE;
 
@@ -588,7 +588,7 @@ impl<'a> PayloadReader<'a> {
             return Some(obj);
         }
 
-        return None;
+        None
     }
 
     pub fn remaining_bytes(&self) -> &[u8] {
@@ -608,15 +608,15 @@ pub fn verify_handshake_alpha_size_and_crc(frame_bytes: &[u8], frame_size_max: u
         return verify_crc(&frame_bytes[..HANDSHAKE_ALPHA_SIZE + FRAME_OVERHEAD_SIZE]);
     }
 
-    return false;
+    false
 }
 
 pub fn verify_handshake_beta_size_and_crc(frame_bytes: &[u8]) -> bool {
     if frame_bytes.len() == HANDSHAKE_BETA_SIZE + FRAME_OVERHEAD_SIZE {
-        return verify_crc(&frame_bytes);
+        return verify_crc(frame_bytes);
     }
 
-    return false;
+    false
 }
 
 pub fn read_type(frame_bytes: &[u8]) -> Option<FrameType> {
@@ -642,7 +642,7 @@ pub fn read_type(frame_bytes: &[u8]) -> Option<FrameType> {
 pub fn verify_crc(buffer: &[u8]) -> bool {
     debug_assert!(buffer.len() >= crc::SIZE);
 
-    let ref data = buffer[..buffer.len() - crc::SIZE];
+    let data = &buffer[..buffer.len() - crc::SIZE];
 
     let crc_bytes = buffer[buffer.len() - crc::SIZE..].try_into().unwrap();
     let crc = u32::from_le_bytes(crc_bytes);
@@ -720,7 +720,7 @@ where
         debug_assert!(dst.len() >= Self::FRAME_SIZE);
         let mut wr = FrameWriter::new(dst, Self::FRAME_TYPE);
         wr.write(self);
-        return wr.finalize();
+        wr.finalize()
     }
 
     fn write_boxed(&self) -> Box<[u8]> {
@@ -728,7 +728,7 @@ where
         let mut wr = FrameWriter::new(&mut buffer, Self::FRAME_TYPE);
         wr.write(self);
         wr.finalize();
-        return buffer;
+        buffer
     }
 }
 
@@ -738,7 +738,7 @@ pub fn write_handshake_alpha(obj: &HandshakeAlphaFrame, frame_size_max: usize) -
     let mut wr = FrameWriter::new(&mut buffer, FrameType::HandshakeAlpha);
     wr.write(obj);
     wr.finalize();
-    return buffer;
+    buffer
 }
 
 pub trait SimplePayloadRead {

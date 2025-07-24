@@ -52,13 +52,11 @@ impl Config {
     fn validate(&self) {
         assert!(
             self.handshake_timeout_ms >= HANDSHAKE_TIMEOUT_MIN_MS,
-            "invalid client configuration: handshake_timeout_ms < {}",
-            HANDSHAKE_TIMEOUT_MIN_MS
+            "invalid client configuration: handshake_timeout_ms < {HANDSHAKE_TIMEOUT_MIN_MS}"
         );
         assert!(
             self.connection_timeout_ms >= CONNECTION_TIMEOUT_MIN_MS,
-            "invalid client configuration: connection_timeout_ms < {}",
-            CONNECTION_TIMEOUT_MIN_MS
+            "invalid client configuration: connection_timeout_ms < {CONNECTION_TIMEOUT_MIN_MS}"
         );
 
         self.channel_balance.validate();
@@ -189,12 +187,12 @@ impl ClientCore {
         let now_ms = self.time_now_ms();
 
         if let Some(t_ms) = self.rto_timer.timeout_ms {
-            let remaining_ms = if t_ms >= now_ms { t_ms - now_ms } else { 0 };
+            let remaining_ms = t_ms.saturating_sub(now_ms);
 
             return Some(time::Duration::from_millis(remaining_ms));
         }
 
-        return None;
+        None
     }
 
     fn process_timeout(&mut self, now_ms: u64) {
@@ -223,7 +221,7 @@ impl ClientCore {
                 let endpoint_ref = Arc::clone(&state.endpoint_ref);
                 let mut endpoint = endpoint_ref.write().unwrap();
 
-                let ref mut host_ctx = EndpointContext::new(self);
+                let host_ctx = &mut EndpointContext::new(self);
 
                 match endpoint.handle_rto_timer(now_ms, host_ctx) {
                     endpoint::TimeoutAction::Continue => (),
@@ -239,7 +237,7 @@ impl ClientCore {
     pub fn process_timeouts(&mut self) {
         let now_ms = self.time_now_ms();
 
-        let ref mut timer = self.rto_timer;
+        let timer = &mut self.rto_timer;
 
         if let Some(timeout_ms) = timer.timeout_ms {
             if now_ms >= timeout_ms {
@@ -254,106 +252,94 @@ impl ClientCore {
         use frame::serial::SimpleFrameWrite;
         use frame::serial::SimplePayloadRead;
 
-        match self.state {
-            State::Handshake(ref mut state) => match state.phase {
-                HandshakePhase::Alpha => {
-                    if let Some(frame) = frame::HandshakeAlphaAckFrame::read(payload_bytes) {
-                        let client_params = frame::ConnectionParams {
-                            packet_size_in_max: u32::max_value(),
-                            packet_size_out_max: u32::max_value(),
-                        };
+        if let State::Handshake(ref mut state) = self.state { if let HandshakePhase::Alpha = state.phase {
+            if let Some(frame) = frame::HandshakeAlphaAckFrame::read(payload_bytes) {
+                let client_params = frame::ConnectionParams {
+                    packet_size_in_max: u32::max_value(),
+                    packet_size_out_max: u32::max_value(),
+                };
 
-                        let nonce_valid = frame.client_nonce == state.local_nonce;
-                        let params_compatible =
-                            connection_params_compatible(&client_params, &frame.server_params);
+                let nonce_valid = frame.client_nonce == state.local_nonce;
+                let params_compatible =
+                    connection_params_compatible(&client_params, &frame.server_params);
 
-                        if nonce_valid && params_compatible {
-                            state.phase = HandshakePhase::Beta;
-                            state.timeout_time_ms = now_ms + state.timeout_ms;
-                            self.rto_timer.timeout_ms = Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
+                if nonce_valid && params_compatible {
+                    state.phase = HandshakePhase::Beta;
+                    state.timeout_time_ms = now_ms + state.timeout_ms;
+                    self.rto_timer.timeout_ms = Some(now_ms + HANDSHAKE_RESEND_TIMEOUT_MS);
 
-                            state.frame = frame::HandshakeBetaFrame {
-                                client_params,
-                                client_nonce: frame.client_nonce,
-                                server_nonce: frame.server_nonce,
-                                server_timestamp: frame.server_timestamp,
-                                server_mac: frame.server_mac,
-                            }
-                            .write_boxed();
-
-                            // println!("requesting phase β...");
-                            self.socket_tx.send(&state.frame);
-                        }
+                    state.frame = frame::HandshakeBetaFrame {
+                        client_params,
+                        client_nonce: frame.client_nonce,
+                        server_nonce: frame.server_nonce,
+                        server_timestamp: frame.server_timestamp,
+                        server_mac: frame.server_mac,
                     }
+                    .write_boxed();
+
+                    // println!("requesting phase β...");
+                    self.socket_tx.send(&state.frame);
                 }
-                _ => (),
-            },
-            _ => (),
-        }
+            }
+        } }
     }
 
     fn handle_handshake_beta_ack(&mut self, payload_bytes: &[u8], now_ms: u64) {
         use frame::serial::SimplePayloadRead;
 
-        match self.state {
-            State::Handshake(ref mut state) => match state.phase {
-                HandshakePhase::Beta => {
-                    if let Some(frame) = frame::HandshakeBetaAckFrame::read(payload_bytes) {
-                        if frame.client_nonce == state.local_nonce {
-                            match frame.error {
-                                None => {
-                                    // Reset previously used timer
-                                    self.rto_timer.timeout_ms = None;
+        if let State::Handshake(ref mut state) = self.state { if let HandshakePhase::Beta = state.phase {
+            if let Some(frame) = frame::HandshakeBetaAckFrame::read(payload_bytes) {
+                if frame.client_nonce == state.local_nonce {
+                    match frame.error {
+                        None => {
+                            // Reset previously used timer
+                            self.rto_timer.timeout_ms = None;
 
-                                    // Keep queued up packets to be sent later
-                                    let packet_buffer = std::mem::take(&mut state.packet_buffer);
+                            // Keep queued up packets to be sent later
+                            let packet_buffer = std::mem::take(&mut state.packet_buffer);
 
-                                    // Create an endpoint now that we're connected
-                                    let endpoint_config = endpoint::Config {
-                                        timeout_time_ms: self.config.connection_timeout_ms,
-                                        prio_config: self.config.channel_balance.clone().into(),
-                                    };
+                            // Create an endpoint now that we're connected
+                            let endpoint_config = endpoint::Config {
+                                timeout_time_ms: self.config.connection_timeout_ms,
+                                prio_config: self.config.channel_balance.clone().into(),
+                            };
 
-                                    let endpoint = endpoint::Endpoint::new(endpoint_config);
-                                    let endpoint_ref = Arc::new(RwLock::new(endpoint));
+                            let endpoint = endpoint::Endpoint::new(endpoint_config);
+                            let endpoint_ref = Arc::new(RwLock::new(endpoint));
 
-                                    // Switch to active state
-                                    self.state = State::Active(ActiveState {
-                                        endpoint_ref: Arc::clone(&endpoint_ref),
-                                    });
+                            // Switch to active state
+                            self.state = State::Active(ActiveState {
+                                endpoint_ref: Arc::clone(&endpoint_ref),
+                            });
 
-                                    // Initialize endpoint
-                                    let mut endpoint = endpoint_ref.write().unwrap();
+                            // Initialize endpoint
+                            let mut endpoint = endpoint_ref.write().unwrap();
 
-                                    let ref mut host_ctx = EndpointContext::new(self);
+                            let host_ctx = &mut EndpointContext::new(self);
 
-                                    endpoint.init(now_ms, host_ctx);
+                            endpoint.init(now_ms, host_ctx);
 
-                                    for (packet, mode) in packet_buffer.into_iter() {
-                                        endpoint.enqueue(packet, mode, now_ms);
-                                    }
-
-                                    endpoint.flush(now_ms, host_ctx);
-                                }
-                                Some(kind) => {
-                                    // Connection failed
-                                    let kind = match kind {
-                                        frame::HandshakeErrorKind::Capacity => ErrorKind::Capacity,
-                                        frame::HandshakeErrorKind::Parameter => {
-                                            ErrorKind::Parameter
-                                        }
-                                    };
-                                    self.events.push_back(Event::Error(kind));
-                                    self.state = State::Quiescent;
-                                }
+                            for (packet, mode) in packet_buffer.into_iter() {
+                                endpoint.enqueue(packet, mode, now_ms);
                             }
+
+                            endpoint.flush(now_ms, host_ctx);
+                        }
+                        Some(kind) => {
+                            // Connection failed
+                            let kind = match kind {
+                                frame::HandshakeErrorKind::Capacity => ErrorKind::Capacity,
+                                frame::HandshakeErrorKind::Parameter => {
+                                    ErrorKind::Parameter
+                                }
+                            };
+                            self.events.push_back(Event::Error(kind));
+                            self.state = State::Quiescent;
                         }
                     }
                 }
-                _ => (),
-            },
-            _ => (),
-        }
+            }
+        } }
     }
 
     fn handle_frame_other(
@@ -362,16 +348,13 @@ impl ClientCore {
         payload_bytes: &[u8],
         now_ms: u64,
     ) {
-        match self.state {
-            State::Active(ref mut state) => {
-                let endpoint_ref = Arc::clone(&state.endpoint_ref);
-                let mut endpoint = endpoint_ref.write().unwrap();
+        if let State::Active(ref mut state) = self.state {
+            let endpoint_ref = Arc::clone(&state.endpoint_ref);
+            let mut endpoint = endpoint_ref.write().unwrap();
 
-                let ref mut host_ctx = EndpointContext::new(self);
+            let host_ctx = &mut EndpointContext::new(self);
 
-                endpoint.handle_frame(frame_type, payload_bytes, now_ms, host_ctx);
-            }
-            _ => (),
+            endpoint.handle_frame(frame_type, payload_bytes, now_ms, host_ctx);
         }
     }
 
@@ -425,7 +408,7 @@ impl ClientCore {
             // Process this frame
             self.handle_frame(frame_bytes);
             // Process any further frames without blocking
-            return self.handle_frames(socket_rx);
+            self.handle_frames(socket_rx)
         }
     }
 
@@ -440,7 +423,7 @@ impl ClientCore {
 
                 let now_ms = self.time_now_ms();
 
-                let ref mut host_ctx = EndpointContext::new(self);
+                let host_ctx = &mut EndpointContext::new(self);
 
                 endpoint.enqueue(packet_bytes, mode, now_ms);
                 endpoint.flush(now_ms, host_ctx);
@@ -475,7 +458,7 @@ impl ClientCore {
 
                 let now_ms = self.time_now_ms();
 
-                let ref mut host_ctx = EndpointContext::new(self);
+                let host_ctx = &mut EndpointContext::new(self);
 
                 endpoint.flush(now_ms, host_ctx);
             }
@@ -492,7 +475,7 @@ impl ClientCore {
 
                 let now_ms = self.time_now_ms();
 
-                let ref mut host_ctx = EndpointContext::new(self);
+                let host_ctx = &mut EndpointContext::new(self);
 
                 endpoint.disconnect(now_ms, host_ctx);
             }
@@ -567,7 +550,7 @@ impl Client {
     ///
     /// Returns `None` if no events are available.
     pub fn poll_event(&mut self) -> Option<Event> {
-        let ref mut core = self.core;
+        let core = &mut self.core;
 
         if core.events.is_empty() {
             core.handle_frames(&mut self.socket_rx);
@@ -575,13 +558,13 @@ impl Client {
             core.process_timeouts();
         }
 
-        return core.events.pop_front();
+        core.events.pop_front()
     }
 
     /// If any events are ready to be processed, returns the next event immediately. Otherwise,
     /// reads inbound frames and processes timeouts until an event can be returned.
     pub fn wait_event(&mut self) -> Event {
-        let ref mut core = self.core;
+        let core = &mut self.core;
 
         loop {
             let wait_timeout = core.next_timer_timeout();
@@ -602,7 +585,7 @@ impl Client {
     ///
     /// Returns `None` if no events were available within `timeout`.
     pub fn wait_event_timeout(&mut self, timeout: time::Duration) -> Option<Event> {
-        let ref mut core = self.core;
+        let core = &mut self.core;
 
         if core.events.is_empty() {
             let mut remaining_timeout = timeout;
@@ -637,7 +620,7 @@ impl Client {
             }
         }
 
-        return core.events.pop_front();
+        core.events.pop_front()
     }
 
     /// Equivalent to calling [`Client::enqueue`] followed by [`Client::flush`].

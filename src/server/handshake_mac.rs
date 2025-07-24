@@ -46,6 +46,6 @@ impl HandshakeMacHasher {
         hasher.write_u32(server_nonce);
         hasher.write_u32(server_timestamp);
 
-        return hasher.finish();
+        hasher.finish()
     }
 }

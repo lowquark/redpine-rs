@@ -97,7 +97,7 @@ pub fn extend(initial_crc: u32, data: &[u8]) -> u32 {
     for &byte in data.iter() {
         crc = (crc >> 8) ^ PARTIAL_RESULTS[(crc as u8 ^ byte) as usize];
     }
-    return crc;
+    crc
 }
 
 pub fn compute(data: &[u8]) -> u32 {

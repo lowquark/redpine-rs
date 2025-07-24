@@ -94,7 +94,7 @@ impl Prio {
             min_chan = Some(3);
         }
 
-        return min_chan;
+        min_chan
     }
 
     pub fn mark_sent(&mut self, channel_idx: u8, data_size: usize) {
@@ -102,7 +102,7 @@ impl Prio {
         debug_assert!(data_size <= DATA_SIZE_MAX);
 
         let weight = self.weights[channel_idx as usize];
-        let ref mut counter = self.counters[channel_idx as usize];
+        let counter = &mut self.counters[channel_idx as usize];
         let counter_max = self.counter_max;
 
         let weighted_size = data_size as u32 * weight;

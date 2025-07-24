@@ -71,11 +71,11 @@ impl ChannelBalanceConfig {
     }
 }
 
-impl Into<prio::Config> for ChannelBalanceConfig {
-    fn into(self) -> prio::Config {
+impl From<ChannelBalanceConfig> for prio::Config {
+    fn from(val: ChannelBalanceConfig) -> Self {
         prio::Config::new(
-            &[self.unreliable_weight, self.reliable_weight, 1, 1],
-            self.burst_size,
+            &[val.unreliable_weight, val.reliable_weight, 1, 1],
+            val.burst_size,
         )
     }
 }
@@ -225,7 +225,7 @@ impl FragmentTxBuffers {
         }
 
         // TODO: Include size of datagram headers here
-        return data_size_total;
+        data_size_total
     }
 }
 
@@ -369,7 +369,7 @@ impl Endpoint {
                     });
                 }
 
-                let ref mut rtt_state = self.rtt_state.as_mut().unwrap();
+                let rtt_state = &mut self.rtt_state.as_mut().unwrap();
 
                 // println!("RTTVAR: {}", rtt_state.rttvar_ms);
                 // println!("SRTT: {}", rtt_state.srtt_ms);
@@ -477,7 +477,7 @@ impl Endpoint {
 
                             let id = datagram.id;
 
-                            let ref fragment = buffer::FragmentRef {
+                            let fragment = &buffer::FragmentRef {
                                 first: datagram.first,
                                 last: datagram.last,
                                 data: datagram.data,
@@ -521,7 +521,7 @@ impl Endpoint {
 
                         let id = datagram.id;
 
-                        let ref fragment = buffer::FragmentRef {
+                        let fragment = &buffer::FragmentRef {
                             first: datagram.first,
                             last: datagram.last,
                             data: datagram.data,
@@ -531,10 +531,8 @@ impl Endpoint {
                             if let Some(packet) = self.unreliable_rx.receive(id, fragment) {
                                 ctx.on_receive(packet);
                             }
-                        } else {
-                            if let Some(packet) = self.reliable_rx.receive(id, fragment) {
-                                ctx.on_receive(packet);
-                            }
+                        } else if let Some(packet) = self.reliable_rx.receive(id, fragment) {
+                            ctx.on_receive(packet);
                         }
                     }
                 });
@@ -644,15 +642,12 @@ impl Endpoint {
                 }
                 _ => (),
             },
-            StateId::Closed => match frame_type {
-                frame::FrameType::Close => {
-                    if self.validate_close_frame(payload_bytes) {
-                        // Acknowledge further requests until destruction
-                        self.send_close_ack_frame(ctx);
-                    }
+            StateId::Closed => if frame_type == frame::FrameType::Close
+                && self.validate_close_frame(payload_bytes) {
+                    // Acknowledge further requests until destruction
+                    self.send_close_ack_frame(ctx);
                 }
-                _ => (),
-            },
+            ,
             _ => (),
         }
     }

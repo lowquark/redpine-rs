@@ -76,7 +76,7 @@ impl TxBuffer {
             }
         }
 
-        return None;
+        None
     }
 
     pub fn pop_sendable(&mut self) -> Option<(u32, &FragmentRc)> {
@@ -101,7 +101,7 @@ impl TxBuffer {
             }
         }
 
-        return None;
+        None
     }
 
     pub fn resend_all(&mut self) {
@@ -120,7 +120,7 @@ impl TxBuffer {
                 self.resend_all();
             }
 
-            return true;
+            true
         } else {
             let new_base_delta = new_base_id.wrapping_sub(self.send_window.base_id);
             let max_ack_delta = self.max_ack_id.wrapping_sub(self.send_window.base_id);
@@ -140,11 +140,11 @@ impl TxBuffer {
 
                 self.duplicate_ack_count = 0;
 
-                return true;
+                true
             } else {
                 // The ack would acknowledge fragments which do not exist or are beyond the send
                 // window
-                return false;
+                false
             }
         }
     }
@@ -182,7 +182,7 @@ impl RxBuffer {
             return false;
         }
 
-        return true;
+        true
     }
 
     pub fn receive(&mut self, fragment_id: u32, fragment: &FragmentRef) -> Option<Box<[u8]>> {
@@ -192,7 +192,7 @@ impl RxBuffer {
             // TODO: If there is no packet currently being built, a fragment should have its first
             // flag set in order to be accepted
 
-            let ref mut current_build = self
+            let current_build = &mut self
                 .current_build
                 .get_or_insert_with(|| PacketBuild { buffer: Vec::new() });
 
@@ -208,7 +208,7 @@ impl RxBuffer {
             }
         }
 
-        return None;
+        None
     }
 
     pub fn next_expected_id(&self) -> u32 {

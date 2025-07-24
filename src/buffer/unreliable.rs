@@ -105,7 +105,7 @@ impl TxBuffer {
             return Some((fragment_id, &entry.fragment));
         }
 
-        return None;
+        None
     }
 
     pub fn pop_sendable(&mut self) -> Option<(u32, FragmentRc)> {
@@ -116,7 +116,7 @@ impl TxBuffer {
             return Some((fragment_id, entry.fragment));
         }
 
-        return None;
+        None
     }
 }
 
@@ -152,7 +152,7 @@ impl RxBuffer {
             return false;
         }
 
-        return true;
+        true
     }
 
     pub fn receive(&mut self, fragment_id: u32, fragment: &FragmentRef) -> Option<Box<[u8]>> {
@@ -202,7 +202,7 @@ impl RxBuffer {
             }
         }
 
-        return None;
+        None
     }
 
     pub fn reset(&mut self) {
